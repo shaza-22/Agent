@@ -1,0 +1,11 @@
+# Core data-gathering dependencies
+requests>=2.31
+beautifulsoup4>=4.12
+lxml>=5.0
+
+# Optional: JavaScript rendering for pages that ship an empty HTML shell.
+# Install with `pip install playwright && playwright install chromium`
+# playwright>=1.44
+
+# Optional: PDF text extraction (tariff/fee schedules are usually PDFs)
+# pypdf>=4.2
