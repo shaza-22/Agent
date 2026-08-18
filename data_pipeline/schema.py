@@ -33,7 +33,8 @@ class Table:
 
 @dataclass
 class Document:
-    url: str                       # canonical URL - the citation
+    url: str                       # canonical URL - the citation, and the dedup key
+    source_url: str                # the exact URL fetched, as it appeared in the crawl
     final_url: str
     title: str
     language: str                  # en | ar | unknown

@@ -156,9 +156,10 @@ def main() -> None:
                 needs_ocr += 1
 
             doc = Document(
-                url=url, final_url=res.final_url,
+                url=config.normalise_url(url), source_url=url,
+                final_url=res.final_url,
                 title=url.rsplit("/", 1)[-1],
-                language=config.detect_language(url),
+                language=config.detect_language(url, text=text),
                 fetched_at=res.fetched_at,
                 content_hash=hashlib.sha256(text.encode()).hexdigest()[:16],
                 text=text, doc_type="pdf", word_count=len(text.split()),

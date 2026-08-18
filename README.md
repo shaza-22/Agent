@@ -101,7 +101,8 @@ One JSON object per line in `data/corpus/documents.jsonl`:
 
 ```jsonc
 {
-  "url": "https://www.banquemisr.com/en/personal/cards/credit-cards",  // the citation
+  "url": "https://www.banquemisr.com/home/pages/credit-cards",   // citation + dedup key
+  "source_url": "https://www.banquemisr.com/Home/Pages/Credit-Cards?csrt=8817", // as fetched
   "title": "Credit Cards | Banque Misr",
   "language": "en",
   "fetched_at": "2026-08-17T00:00:00Z",     // freshness, for staleness checks
@@ -121,6 +122,17 @@ One JSON object per line in `data/corpus/documents.jsonl`:
 
 `sections[].anchor` is what lets the agent cite `…/credit-cards#fees` rather
 than a whole page — the Source Attribution requirement in the brief.
+
+`url` is the canonical form: session tokens stripped, path lowercased. It is
+both the dedup key and the citation, and it stays valid over time — the raw
+`source_url` may carry a `csrt` token that expires. Both are kept so
+verification can match documents against the crawl manifest, whichever form a
+given record was recorded under.
+
+Language is decided by explicit declaration first (`<html lang>`,
+`content-language`, `og:locale`), then the URL, then **the script the text is
+written in**. The script check is what makes it work on this site, whose real
+URLs (`/home/pages/fees`) carry no language segment at all.
 
 ## Retrieval, day one
 

@@ -50,7 +50,16 @@ def parse_ts(s: str):
 def run_checks(manifest: list[dict], docs: list[dict], pdfs: list[dict],
                max_age_days: int) -> Checks:
     c = Checks()
-    ok_urls = {r["url"] for r in manifest if 200 <= r.get("status", 0) < 300}
+    # Compare canonical forms on both sides. The manifest holds URLs exactly as
+    # they were requested (mixed case, session tokens); documents hold the
+    # canonical form. Comparing them raw reports every document as unresolvable
+    # while nothing is actually wrong.
+    ok_urls = set()
+    for r in manifest:
+        if 200 <= r.get("status", 0) < 300 and not r.get("blocked"):
+            ok_urls.add(config.normalise_url(r["url"]))
+            if r.get("final_url"):
+                ok_urls.add(config.normalise_url(r["final_url"]))
 
     # --- 1. The corpus exists at all ---------------------------------------
     if not docs:
@@ -69,7 +78,10 @@ def run_checks(manifest: list[dict], docs: list[dict], pdfs: list[dict],
           missing)
 
     # --- 3. Citations resolve to a page that actually returned 2xx ---------
-    unresolvable = [d["url"] for d in docs if d["url"] not in ok_urls]
+    unresolvable = [d["url"] for d in docs
+                    if config.normalise_url(d["url"]) not in ok_urls
+                    and config.normalise_url(d.get("source_url") or d["url"])
+                    not in ok_urls]
     c.add("every citation URL fetched successfully",
           FAIL if unresolvable else PASS,
           f"{len(unresolvable)} documents cite a URL with no 2xx crawl record",
@@ -132,13 +144,22 @@ def run_checks(manifest: list[dict], docs: list[dict], pdfs: list[dict],
               "extractor is missing tab/accordion content. Verify by hand.")
 
     # --- 9. PDF coverage ----------------------------------------------------
-    linked_pdfs = {u for d in docs for u in d.get("pdf_links", [])}
-    got_pdfs = {p["url"] for p in pdfs}
+    # Both sides canonicalised, or the sets never intersect and every linked
+    # PDF looks missing while every fetched one looks unlinked.
+    linked_pdfs = {config.normalise_url(u)
+                   for d in docs for u in d.get("pdf_links", [])}
+    got_pdfs = {config.normalise_url(p["url"]) for p in pdfs}
+    got_pdfs |= {config.normalise_url(p["source_url"]) for p in pdfs
+                 if p.get("source_url")}
     unfetched = sorted(linked_pdfs - got_pdfs)
+    extra = sorted(got_pdfs - linked_pdfs)
     c.add("linked PDFs were fetched",
           WARN if unfetched else PASS,
-          f"{len(linked_pdfs)} PDFs linked, {len(got_pdfs)} fetched, "
-          f"{len(unfetched)} missing (run pdf_ingest.py)",
+          f"{len(linked_pdfs)} linked from pages, {len(pdfs)} attachment "
+          f"documents held, {len(linked_pdfs & got_pdfs)} matched; "
+          f"{len(unfetched)} linked-but-not-fetched (run pdf_ingest.py), "
+          f"{len(extra)} fetched-but-not-linked (queued from the crawl, "
+          f"or linked from a page that was blocked/dropped)",
           unfetched)
     ocr = [p["url"] for p in pdfs if p.get("needs_ocr")]
     if ocr:

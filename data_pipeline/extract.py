@@ -137,11 +137,22 @@ def split_into_sections(main) -> list[Section]:
     return [s for s in sections if s.text or s.heading]
 
 
-def parse_page(html: str, url: str, final_url: str, fetched_at: str) -> Document:
+def parse_page(html: str, url: str, final_url: str, fetched_at: str,
+               source_url: str | None = None) -> Document:
     soup = BeautifulSoup(html, "lxml")
 
     title = clean_text(soup.title.get_text()) if soup.title else ""
-    html_lang = soup.html.get("lang") if soup.html else None
+    html_lang = None
+    if soup.html:
+        html_lang = soup.html.get("lang") or soup.html.get("xml:lang")
+    # Secondary declarations, used when <html lang> is absent (it often is).
+    meta_lang = None
+    for attrs in ({"http-equiv": "content-language"}, {"name": "language"},
+                  {"property": "og:locale"}):
+        tag = soup.find("meta", attrs=attrs)
+        if tag and tag.get("content"):
+            meta_lang = tag["content"]
+            break
     meta_desc_tag = soup.find("meta", attrs={"name": "description"})
     meta_desc = clean_text(meta_desc_tag.get("content", "")) if meta_desc_tag else None
     breadcrumbs = extract_breadcrumbs(soup)
@@ -175,9 +186,11 @@ def parse_page(html: str, url: str, final_url: str, fetched_at: str) -> Document
 
     return Document(
         url=url,
+        source_url=source_url or url,
         final_url=final_url,
         title=title,
-        language=config.detect_language(url, html_lang),
+        language=config.detect_language(url, html_lang, text=text,
+                                        meta_lang=meta_lang),
         fetched_at=fetched_at,
         content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
         breadcrumbs=breadcrumbs,
@@ -238,7 +251,7 @@ def main() -> None:
             seen_urls.add(canonical)
 
             doc = parse_page(html, canonical, rec.get("final_url") or canonical,
-                             rec.get("fetched_at", ""))
+                             rec.get("fetched_at", ""), source_url=rec["url"])
             if doc.word_count < args.min_words:
                 dropped += 1
                 continue

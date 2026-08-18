@@ -395,3 +395,112 @@ class TestBlockPageClassification(unittest.TestCase):
               "block_hashes": [soft404.text_hash(self.BLOCK)]}
         self.assertTrue(soft404.is_blocked_fingerprint(self.BLOCK, fp))
         self.assertFalse(soft404.is_soft_404(self.BLOCK, fp))
+
+
+class TestCitationSurvivesNormalisation(unittest.TestCase):
+    """Canonicalising for dedup must not break citation verification."""
+
+    RAW = "https://www.banquemisr.com/Home/Pages/Fees?csrt=88817263"
+    CANON = "https://www.banquemisr.com/home/pages/fees"
+
+    def test_document_keeps_both_forms(self):
+        from extract import parse_page
+        html = ("<html lang='en'><body><main><h1>Fees</h1><p>Annual fee EGP 350 "
+                "with eligibility criteria.</p></main></body></html>")
+        doc = parse_page(html, config.normalise_url(self.RAW), self.RAW,
+                         "2026-08-18T00:00:00Z", source_url=self.RAW)
+        self.assertEqual(doc.url, self.CANON)      # stable dedup key + citation
+        self.assertEqual(doc.source_url, self.RAW)  # exactly what was fetched
+
+    def test_verifier_matches_canonical_against_raw_manifest(self):
+        # The regression: manifest holds raw URLs, documents hold canonical
+        # ones, and comparing them raw reported every document unresolvable.
+        import verify_corpus as v
+        manifest = [{"url": self.RAW, "final_url": self.RAW, "status": 200,
+                     "outlinks": []}]
+        doc = {"url": self.CANON, "source_url": self.RAW, "title": "Fees",
+               "fetched_at": "2026-08-18T00:00:00Z", "content_hash": "abc",
+               "language": "en", "word_count": 100, "sections": [], "tables": [],
+               "pdf_links": [], "links": [],
+               "text": "credit card eligibility fee account document interest rate loan"}
+        checks = v.run_checks(manifest, [doc], [], 30)
+        status = next(r["status"] for r in checks.results
+                      if r["check"] == "every citation URL fetched successfully")
+        self.assertEqual(status, v.PASS)
+
+    def test_blocked_manifest_rows_do_not_count_as_resolvable(self):
+        import verify_corpus as v
+        manifest = [{"url": self.RAW, "status": 200, "blocked": True, "outlinks": []}]
+        doc = {"url": self.CANON, "source_url": self.RAW, "title": "Fees",
+               "fetched_at": "2026-08-18T00:00:00Z", "content_hash": "abc",
+               "language": "en", "word_count": 100, "sections": [], "tables": [],
+               "pdf_links": [], "links": [], "text": "fee"}
+        checks = v.run_checks(manifest, [doc], [], 30)
+        status = next(r["status"] for r in checks.results
+                      if r["check"] == "every citation URL fetched successfully")
+        self.assertEqual(status, v.FAIL)
+
+
+class TestLanguageDetection(unittest.TestCase):
+    """Real URLs carry no language segment, so script decides."""
+
+    REAL_URL = "https://www.banquemisr.com/home/pages/fees"
+    EN_TEXT = ("Fees and commissions for accounts and services. Annual fee "
+               "EGP 350, eligibility criteria apply to all applicants.")
+    AR_TEXT = ("الرسوم والعمولات للحسابات والخدمات المصرفية ورسوم سنوية "
+               "وشروط الاستحقاق والمستندات المطلوبة لجميع المتقدمين")
+
+    def test_script_decides_when_url_has_no_language_segment(self):
+        self.assertEqual(config.detect_language(self.REAL_URL, text=self.EN_TEXT), "en")
+        self.assertEqual(config.detect_language(self.REAL_URL, text=self.AR_TEXT), "ar")
+
+    def test_arabic_survives_latin_branding_on_the_page(self):
+        mixed = "Banque Misr - " + self.AR_TEXT
+        self.assertEqual(config.detect_language(self.REAL_URL, text=mixed), "ar")
+
+    def test_explicit_declaration_beats_everything(self):
+        self.assertEqual(
+            config.detect_language(self.REAL_URL, "ar-EG", text=self.EN_TEXT), "ar")
+        self.assertEqual(
+            config.detect_language(self.REAL_URL, None, self.EN_TEXT, "ar"), "ar")
+
+    def test_empty_lang_attribute_falls_through_instead_of_winning(self):
+        self.assertEqual(config.detect_language(self.REAL_URL, "", text=self.AR_TEXT), "ar")
+
+    def test_language_query_parameter(self):
+        self.assertEqual(
+            config.detect_language("https://www.banquemisr.com/x?sc_lang=ar"), "ar")
+
+    def test_legacy_path_segments_still_work(self):
+        self.assertEqual(config.detect_language(
+            "https://www.banquemisr.com/en/personal"), "en")
+        self.assertEqual(config.detect_language(
+            "https://www.banquemisr.com/arabic/personal"), "ar")
+
+    def test_no_signal_returns_unknown_rather_than_guessing(self):
+        self.assertEqual(config.detect_language("https://www.banquemisr.com/x"), "unknown")
+        self.assertEqual(config.detect_script_language("123 456 !!"), "unknown")
+
+
+class TestPdfCoverageAccounting(unittest.TestCase):
+    """The linked/fetched/missing counts must describe the same URL space."""
+
+    def test_case_and_token_variants_still_match(self):
+        import verify_corpus as v
+        doc = {"url": "https://www.banquemisr.com/home/pages/fees",
+               "source_url": "https://www.banquemisr.com/Home/Pages/Fees",
+               "title": "Fees", "fetched_at": "2026-08-18T00:00:00Z",
+               "content_hash": "abc", "language": "en", "word_count": 100,
+               "sections": [], "tables": [], "links": [],
+               "pdf_links": ["https://www.banquemisr.com/-/media/BM/Tariff.ashx"],
+               "text": "credit card eligibility fee account document interest rate loan"}
+        # Attachment recorded under the raw mixed-case URL it was fetched from.
+        pdfs = [{"url": "https://www.banquemisr.com/-/Media/BM/Tariff.ashx",
+                 "source_url": "https://www.banquemisr.com/-/Media/BM/Tariff.ashx",
+                 "title": "Tariff.ashx", "text": "annual fee",
+                 "fetched_at": "2026-08-18T00:00:00Z"}]
+        manifest = [{"url": doc["source_url"], "status": 200, "outlinks": []}]
+        checks = v.run_checks(manifest, [doc], pdfs, 30)
+        r = next(r for r in checks.results if r["check"] == "linked PDFs were fetched")
+        self.assertEqual(r["status"], v.PASS)
+        self.assertIn("1 matched", r["detail"])

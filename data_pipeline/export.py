@@ -50,8 +50,8 @@ def build_sqlite(path, docs, pdfs) -> None:
     db = sqlite3.connect(path)
     db.executescript("""
         CREATE TABLE documents(
-            url TEXT PRIMARY KEY, title TEXT, language TEXT, doc_type TEXT,
-            section_path TEXT, breadcrumbs TEXT, fetched_at TEXT,
+            url TEXT PRIMARY KEY, source_url TEXT, title TEXT, language TEXT,
+            doc_type TEXT, section_path TEXT, breadcrumbs TEXT, fetched_at TEXT,
             content_hash TEXT, word_count INTEGER, text TEXT);
         CREATE TABLE sections(
             id INTEGER PRIMARY KEY, url TEXT, heading TEXT, level INTEGER,
@@ -66,8 +66,9 @@ def build_sqlite(path, docs, pdfs) -> None:
     """)
 
     for d in docs + pdfs:
-        db.execute("INSERT OR REPLACE INTO documents VALUES (?,?,?,?,?,?,?,?,?,?)", (
-            d["url"], d.get("title", ""), d.get("language", ""),
+        db.execute("INSERT OR REPLACE INTO documents VALUES (?,?,?,?,?,?,?,?,?,?,?)", (
+            d["url"], d.get("source_url", d["url"]),
+            d.get("title", ""), d.get("language", ""),
             d.get("doc_type", "page"), "/".join(d.get("section_path", [])),
             " > ".join(d.get("breadcrumbs", [])), d.get("fetched_at", ""),
             d.get("content_hash", ""), d.get("word_count", 0), d.get("text", "")))
@@ -187,9 +188,9 @@ def main() -> None:
     counts = {}
     counts["documents"] = write_csv(
         export_dir / "documents.csv",
-        ["url", "title", "language", "doc_type", "section_path", "breadcrumbs",
-         "fetched_at", "content_hash", "word_count", "n_sections", "n_tables",
-         "n_pdf_links"],
+        ["url", "source_url", "title", "language", "doc_type", "section_path",
+         "breadcrumbs", "fetched_at", "content_hash", "word_count", "n_sections",
+         "n_tables", "n_pdf_links"],
         ({**d,
           "section_path": "/".join(d.get("section_path", [])),
           "breadcrumbs": " > ".join(d.get("breadcrumbs", [])),

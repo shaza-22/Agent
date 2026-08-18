@@ -230,18 +230,67 @@ def in_scope(url: str) -> bool:
     return not any(pat.search(url) for pat in SKIP_URL_PATTERNS)
 
 
-def detect_language(url: str, html_lang: str | None = None) -> str:
-    """Banque Misr serves English and Arabic. Tag every document with one."""
-    if html_lang:
-        low = html_lang.lower()
-        if low.startswith("ar"):
-            return "ar"
-        if low.startswith("en"):
-            return "en"
-    path = urlparse(url).path.lower()
-    if re.search(r"(^|/)(ar|ar-eg)(/|$)", path):
+def detect_language(url: str, html_lang: str | None = None,
+                    text: str | None = None, meta_lang: str | None = None) -> str:
+    """Tag a document as `en`, `ar`, or `unknown`.
+
+    Tried in order of reliability:
+      1. an explicit declaration (`<html lang>`, `xml:lang`, content-language,
+         `og:locale`)
+      2. the URL, covering the several ways a site marks language
+      3. **the script the text is actually written in**
+
+    Step 3 is what makes this work. Earlier versions relied on step 2 alone and
+    tagged almost everything `unknown`, because this site's real URLs look like
+    `/home/pages/fees` - no language segment anywhere. Arabic and English are
+    written in different scripts, so counting characters answers the question
+    directly instead of inferring it from a naming convention that may not exist.
+    """
+    for declared in (html_lang, meta_lang):
+        if declared:
+            low = declared.strip().lower()
+            if low.startswith("ar"):
+                return "ar"
+            if low.startswith("en"):
+                return "en"
+
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    query = parsed.query.lower()
+    if re.search(r"(^|/)(ar|ar-eg|ar-sa|arabic)(/|-|_|$)", path) or \
+            re.search(r"(^|[?&])(sc_)?lang(uage)?=ar", query):
         return "ar"
-    if re.search(r"(^|/)(en|en-us|en-eg)(/|$)", path):
+    if re.search(r"(^|/)(en|en-us|en-eg|en-gb|english)(/|-|_|$)", path) or \
+            re.search(r"(^|[?&])(sc_)?lang(uage)?=en", query):
+        return "en"
+
+    if text:
+        return detect_script_language(text)
+    return "unknown"
+
+
+# Arabic block, plus the supplement and presentation forms used for ligatures.
+_ARABIC_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]")
+_LATIN_RE = re.compile(r"[A-Za-z]")
+
+
+def detect_script_language(text: str, threshold: float = 0.15) -> str:
+    """Decide language from the script the text is written in.
+
+    Bilingual pages carry some of both (an English nav on an Arabic page, a
+    bank name in Latin script on an Arabic one), so this is a ratio rather than
+    a presence test. Arabic passes a low bar because a page with a meaningful
+    amount of Arabic prose is an Arabic page, even with Latin branding on it.
+    """
+    sample = text[:20000]
+    arabic = len(_ARABIC_RE.findall(sample))
+    latin = len(_LATIN_RE.findall(sample))
+    total = arabic + latin
+    if total < 20:
+        return "unknown"
+    if arabic / total >= threshold:
+        return "ar"
+    if latin / total >= 0.5:
         return "en"
     return "unknown"
 
