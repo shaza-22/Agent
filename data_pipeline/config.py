@@ -52,7 +52,10 @@ CORPUS_FILE = CORPUS_DIR / "documents.jsonl"
 SKIP_URL_PATTERNS = [
     re.compile(p, re.I)
     for p in (
-        r"\.(jpg|jpeg|png|gif|svg|webp|ico|css|js|woff2?|ttf|eot|mp4|zip|xlsx?|docx?)(\?|$)",
+        # Note: spreadsheet/document extensions are NOT skipped - at banks the
+        # fee and rate schedules are published as attachments, so they are
+        # routed to the attachment handler instead of being discarded.
+        r"\.(jpg|jpeg|png|gif|svg|webp|ico|css|js|woff2?|ttf|eot|mp4)(\?|$)",
         r"/(login|signin|logout|register|otp|netbanking|ib/|onlinebanking)",  # auth walls
         r"[?&](utm_|fbclid|gclid)",                                          # tracking noise
         r"#",                                                                # fragments
@@ -66,6 +69,88 @@ DROP_QUERY_PARAMS = {"utm_source", "utm_medium", "utm_campaign", "utm_term",
                      "utm_content", "fbclid", "gclid", "ref", "_ga"}
 
 PDF_PATTERN = re.compile(r"\.pdf(\?|$)", re.I)
+
+# Attachments are documents served for download rather than pages to read.
+# Extension alone is not enough: Sitecore serves files through a media handler
+# (`/-/media/<name>.ashx`, sometimes with no extension at all), so the URL only
+# hints at what a thing is - `Fetcher` confirms it from the Content-Type header
+# and the file's magic bytes.
+ATTACHMENT_URL_PATTERNS = [
+    re.compile(p, re.I)
+    for p in (
+        r"\.(pdf|xlsx?|docx?|pptx?|csv|zip|rtf)(\?|$)",
+        r"\.ashx(\?|$)",     # Sitecore media handler
+        r"/-/media/",         # Sitecore media library path
+        r"/download",
+        r"/attachment",
+    )
+]
+
+# Content types that are documents, not pages. Mapped to the file extension
+# used when storing them in the raw store.
+BINARY_CONTENT_TYPES = {
+    "application/pdf": ".pdf",
+    "application/x-pdf": ".pdf",
+    "application/vnd.ms-excel": ".xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/msword": ".doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.ms-powerpoint": ".ppt",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "text/csv": ".csv",
+    "application/zip": ".zip",
+    "application/octet-stream": ".bin",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/tiff": ".tif",
+}
+
+# Magic-byte signatures. The Content-Type header lies often enough - especially
+# behind media handlers, which love `application/octet-stream` - that the bytes
+# are the final authority on what a file actually is.
+MAGIC_SIGNATURES = [
+    (b"%PDF-", "pdf", ".pdf"),
+    (b"PK\x03\x04", "office_or_zip", ".zip"),   # xlsx/docx/pptx are zip containers
+    (b"\xd0\xcf\x11\xe0", "office_legacy", ".doc"),  # OLE2: .doc/.xls/.ppt
+    (b"\xff\xd8\xff", "image", ".jpg"),
+    (b"\x89PNG\r\n", "image", ".png"),
+    (b"II*\x00", "image", ".tif"),
+    (b"MM\x00*", "image", ".tif"),
+    (b"{\\rtf", "rtf", ".rtf"),
+]
+
+
+def is_attachment_url(url: str) -> bool:
+    """True if the URL looks like a downloadable document rather than a page."""
+    return any(pat.search(url) for pat in ATTACHMENT_URL_PATTERNS)
+
+
+def sniff_kind(content_type: str, head: bytes) -> tuple[str, str]:
+    """Decide what a fetched response really is.
+
+    Returns (kind, file_extension) where kind is one of:
+    html | pdf | image | office_or_zip | office_legacy | rtf | other
+
+    Magic bytes win over the header, because a media handler that labels a PDF
+    `application/octet-stream` (or worse, `text/html`) is common and would
+    otherwise land a binary blob in the HTML corpus as mojibake.
+    """
+    for sig, kind, ext in MAGIC_SIGNATURES:
+        if head.startswith(sig):
+            return kind, ext
+    ct = (content_type or "").split(";")[0].strip().lower()
+    if ct in BINARY_CONTENT_TYPES:
+        ext = BINARY_CONTENT_TYPES[ct]
+        if ct.startswith("image/"):
+            return "image", ext
+        if ct in ("application/pdf", "application/x-pdf"):
+            return "pdf", ext
+        return "other", ext
+    if ct in ("text/html", "application/xhtml+xml", "text/plain", ""):
+        return "html", ".html"
+    if ct.startswith("text/"):
+        return "html", ".html"
+    return "other", ".bin"
 
 
 def normalise_url(url: str) -> str:

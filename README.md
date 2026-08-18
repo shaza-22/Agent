@@ -76,6 +76,8 @@ records where it all came from.
 | `verify_corpus.py` | **Trust gate** — 13 checks, exits non-zero on failure | corpus | `data/reports/verification.md` |
 | `export.py` | CSVs, SQLite FTS5 index, dataset card | corpus | `data/export/` |
 | `import_local.py` | Ingests an existing `wget` mirror instead of crawling | mirror dir | `data/raw/` |
+| `refetch.py` | Re-fetches specific URLs only, no full re-crawl | URL list/regex | updated `data/raw/` |
+| `diagnose.py` | Compares manifest against bytes on disk; finds stale state | manifest | stdout table |
 
 ## Configuration
 
@@ -149,6 +151,39 @@ citations, shell pages, unanswerable corpora).
 The full pipeline is validated end to end by serving a synthetic fixture site
 over `python -m http.server` and running every stage against it — zero requests
 to banquemisr.com.
+
+## Attachments (where the fee and rate numbers actually live)
+
+Banque Misr runs Sitecore, which serves downloads through a media handler:
+`/-/media/<name>.ashx`, sometimes with no extension at all, and frequently
+under a misleading `Content-Type` (`application/octet-stream`, or even
+`text/html`, for a file that is really a PDF).
+
+So file type is decided from the **response**, not the URL: `config.sniff_kind`
+checks magic bytes first and falls back to the header. `.ashx`, `/-/media/`,
+spreadsheets and Word documents are all routed to `pdf_ingest.py`, which
+classifies each file and extracts what it can. Attachments that turn out to be
+**scanned images have no extractable text and are flagged `needs_ocr`** — they
+are recorded, never silently dropped.
+
+Note that attachments land in `data/corpus/pdf_documents.jsonl`, *not*
+`documents.jsonl`. Grep both:
+
+```bash
+cat data/corpus/*.jsonl | grep -ic "annual fee"
+```
+
+## Debugging a stage that appears to have done nothing
+
+```bash
+python diagnose.py --all-unrendered     # manifest vs bytes on disk
+python refetch.py --match '(?i)(fee|tariff|rate|charge)' --discover-links
+```
+
+`render.py` writes its results back into `manifest.jsonl` and recomputes
+`looks_unrendered` against the rendered DOM. Without that write-back the flag
+stays frozen at its crawl-time value and `audit.py` reports the same count
+forever, however many times you render.
 
 ## Crawling policy
 

@@ -79,7 +79,7 @@ def main() -> None:
         (config.normalise_url(u), 0, None) for u in seeds
     )
     visited: set[str] = set()
-    pdf_urls: set[str] = set()
+    attachment_urls: set[str] = set()
     unrendered = 0
 
     with open(config.CRAWL_MANIFEST, "w", encoding="utf-8") as manifest:
@@ -89,8 +89,8 @@ def main() -> None:
                 continue
             visited.add(url)
 
-            if config.PDF_PATTERN.search(url):
-                pdf_urls.add(url)          # handled by pdf_ingest.py, not here
+            if config.is_attachment_url(url):
+                attachment_urls.add(url)   # handled by pdf_ingest.py, not here
                 continue
 
             res = f.fetch(url)
@@ -104,8 +104,8 @@ def main() -> None:
                     unrendered += 1
                 for link in links:
                     if link not in visited:
-                        if config.PDF_PATTERN.search(link):
-                            pdf_urls.add(link)
+                        if config.is_attachment_url(link):
+                            attachment_urls.add(link)
                         else:
                             frontier.append((link, depth + 1, url))
 
@@ -117,6 +117,7 @@ def main() -> None:
                 "depth": depth,
                 "discovered_from": parent,
                 "content_type": res.content_type,
+                "kind": res.kind,
                 "raw_path": res.raw_path,
                 "fetched_at": res.fetched_at,
                 "from_cache": res.from_cache,
@@ -129,9 +130,10 @@ def main() -> None:
                 print(f"[crawl] {len(visited)} pages, frontier={len(frontier)}")
 
     (config.RAW_DIR / "pdf_urls.json").write_text(
-        json.dumps(sorted(pdf_urls), indent=2), encoding="utf-8"
+        json.dumps(sorted(attachment_urls), indent=2), encoding="utf-8"
     )
-    print(f"[crawl] done: {len(visited)} URLs, {len(pdf_urls)} PDFs queued")
+    print(f"[crawl] done: {len(visited)} URLs, "
+          f"{len(attachment_urls)} attachments queued")
     if unrendered:
         print(f"[crawl] WARNING: {unrendered} pages looked client-rendered. "
               f"Re-fetch those with render.py before extracting.")

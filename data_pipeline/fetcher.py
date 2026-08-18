@@ -32,6 +32,7 @@ class FetchResult:
     fetched_at: str
     from_cache: bool
     error: str | None = None
+    kind: str = "html"   # html | pdf | image | office_or_zip | office_legacy | rtf | other
 
     def ok(self) -> bool:
         return self.error is None and 200 <= self.status < 300
@@ -99,21 +100,30 @@ class Fetcher:
             time.sleep(config.REQUEST_DELAY_SEC - elapsed)
         self._last_request = time.time()
 
-    def fetch(self, url: str, *, binary: bool = False) -> FetchResult:
+    def fetch(self, url: str, *, binary: bool | None = None) -> FetchResult:
+        """Fetch a URL, deciding html-vs-binary from the response, not the URL.
+
+        `binary` is an optional override; leave it None to auto-detect. The
+        Content-Type header is only a hint - magic bytes decide - because
+        Sitecore's media handler routinely serves PDFs as octet-stream or even
+        text/html, which would otherwise store a binary blob as mojibake HTML.
+        """
         url = config.normalise_url(url)
         key = url_key(url)
-        suffix = ".bin" if binary else ".html"
-        raw_path = self.pages_dir / f"{key}{suffix}"
         meta_path = self.pages_dir / f"{key}.meta.json"
 
-        if self.use_cache and raw_path.exists() and meta_path.exists():
+        if self.use_cache and meta_path.exists():
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            meta["from_cache"] = True
-            return FetchResult(**meta)
+            raw = meta.get("raw_path")
+            if raw and Path(raw).exists():
+                meta.pop("rendered", None)
+                meta.pop("imported_from", None)
+                meta["from_cache"] = True
+                return FetchResult(**meta)
 
         if not self.allowed(url):
             return FetchResult(url, url, 0, "", None, _now(), False,
-                               error="blocked by robots.txt")
+                               error="blocked by robots.txt", kind="other")
 
         last_error = None
         for attempt in range(config.MAX_RETRIES):
@@ -126,29 +136,42 @@ class Fetcher:
                     last_error = f"HTTP {resp.status_code}"
                     time.sleep(2 ** attempt * 2)  # 2s, 4s, 8s backoff
                     continue
-                if binary:
-                    raw_path.write_bytes(resp.content)
-                else:
+
+                content_type = resp.headers.get("Content-Type", "")
+                body = resp.content
+                kind, ext = config.sniff_kind(content_type, body[:16])
+                if binary is True and kind == "html":
+                    kind, ext = "other", ".bin"
+                elif binary is False:
+                    kind, ext = "html", ".html"
+
+                raw_path = self.pages_dir / f"{key}{ext}"
+                if kind == "html":
                     raw_path.write_text(resp.text, encoding="utf-8")
+                else:
+                    raw_path.write_bytes(body)
+
                 result = FetchResult(
                     url=url,
                     final_url=config.normalise_url(resp.url),
                     status=resp.status_code,
-                    content_type=resp.headers.get("Content-Type", ""),
+                    content_type=content_type,
                     raw_path=str(raw_path),
                     fetched_at=_now(),
                     from_cache=False,
+                    kind=kind,
                 )
                 meta = asdict(result)
-                meta.pop("from_cache")
                 meta["from_cache"] = False
-                meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+                meta_path.write_text(json.dumps(meta, ensure_ascii=False),
+                                     encoding="utf-8")
                 return result
             except requests.RequestException as exc:
                 last_error = str(exc)
                 time.sleep(2 ** attempt * 2)
 
-        return FetchResult(url, url, 0, "", None, _now(), False, error=last_error)
+        return FetchResult(url, url, 0, "", None, _now(), False,
+                           error=last_error, kind="other")
 
 
 def _now() -> str:

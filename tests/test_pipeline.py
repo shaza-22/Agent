@@ -194,3 +194,78 @@ class TestMirrorImport(unittest.TestCase):
         for rel, expected in cases.items():
             self.assertEqual(
                 import_local.path_to_url(root / rel, root, base), expected, rel)
+
+
+class TestAttachmentDetection(unittest.TestCase):
+    """Sitecore media handlers hide documents behind .ashx and lie in headers."""
+
+    def test_sitecore_urls_are_attachments(self):
+        for url in ("https://www.banquemisr.com/-/media/BM/Exchange-rate-EN.ashx",
+                    "https://www.banquemisr.com/-/media/BM/fees",
+                    "https://www.banquemisr.com/docs/tariff.pdf",
+                    "https://www.banquemisr.com/docs/fees.xlsx"):
+            self.assertTrue(config.is_attachment_url(url), url)
+        self.assertFalse(
+            config.is_attachment_url("https://www.banquemisr.com/en/personal/cards"))
+
+    def test_spreadsheets_are_no_longer_skipped(self):
+        # Fee schedules are often .xlsx; skipping them loses the numbers.
+        self.assertTrue(config.in_scope("https://www.banquemisr.com/docs/fees.xlsx"))
+        self.assertTrue(config.in_scope("https://www.banquemisr.com/-/media/a.ashx"))
+
+    def test_magic_bytes_beat_a_lying_content_type(self):
+        # The real trap: a PDF served as text/html by the media handler.
+        self.assertEqual(config.sniff_kind("text/html", b"%PDF-1.7 ..."), ("pdf", ".pdf"))
+        self.assertEqual(config.sniff_kind("application/octet-stream", b"%PDF-1.4"),
+                         ("pdf", ".pdf"))
+
+    def test_scanned_image_is_identified(self):
+        kind, _ = config.sniff_kind("application/octet-stream", b"\xff\xd8\xff\xe0")
+        self.assertEqual(kind, "image")
+        kind, _ = config.sniff_kind("image/png", b"\x89PNG\r\n")
+        self.assertEqual(kind, "image")
+
+    def test_real_html_still_reads_as_html(self):
+        self.assertEqual(config.sniff_kind("text/html; charset=utf-8",
+                                           b"<!DOCTYPE html>"), ("html", ".html"))
+
+
+class TestRenderManifestWriteBack(unittest.TestCase):
+    """render.py must update the manifest, or audit.py reports a frozen count."""
+
+    def test_manifest_is_updated_and_flag_recomputed(self):
+        import tempfile, json as _json
+        from pathlib import Path as _Path
+        import render
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = _Path(tmp)
+            orig_raw, orig_manifest = config.RAW_DIR, config.CRAWL_MANIFEST
+            try:
+                config.RAW_DIR = tmp / "raw"
+                config.CRAWL_MANIFEST = config.RAW_DIR / "manifest.jsonl"
+                (config.RAW_DIR / "pages").mkdir(parents=True)
+
+                url = "https://www.banquemisr.com/en/tariff"
+                config.CRAWL_MANIFEST.write_text(_json.dumps({
+                    "url": url, "final_url": url, "status": 200,
+                    "content_type": "text/html", "raw_path": "old.html",
+                    "looks_unrendered": True, "outlinks": [],
+                }) + "\n", encoding="utf-8")
+
+                html = ("<html><body><main><h1>Tariff</h1>"
+                        + "<p>Annual fee EGP 350 eligibility interest rate.</p>" * 20
+                        + '<a href="/docs/t.pdf">pdf</a></main></body></html>')
+                written, updated = render.write_back(
+                    {url: {"html": html, "final_url": url, "words_after": 200}})
+
+                self.assertEqual((written, updated), (1, 1))
+                rec = _json.loads(config.CRAWL_MANIFEST.read_text(encoding="utf-8"))
+                self.assertTrue(rec["rendered"])
+                self.assertFalse(rec["looks_unrendered"])   # recomputed, not frozen
+                self.assertEqual(rec["words_after"], 200)
+                self.assertTrue(rec["raw_path"].endswith(".html"))
+                # link graph refreshed from the rendered DOM
+                self.assertIn("https://www.banquemisr.com/docs/t.pdf", rec["outlinks"])
+            finally:
+                config.RAW_DIR, config.CRAWL_MANIFEST = orig_raw, orig_manifest
