@@ -467,3 +467,100 @@ class TestCorpusExistenceCheck(RetrievalEvalFixture):
     def test_absent_topic_reports_nothing(self):
         from retrieval.diagnostics import inspect_topic
         self.assertEqual(inspect_topic(self.r, r"cryptocurrency custody"), [])
+
+
+class TestSegmentClassificationRegression(unittest.TestCase):
+    """Real-corpus evidence: 637/1264 units were labelled corporate against
+    only 88 consumer, because the classifier scanned page body text. Since the
+    ranker penalises corporate results on personal questions, that demoted half
+    the corpus and let unclassified generic pages win.
+    """
+
+    def test_body_text_does_not_flip_a_retail_page_to_corporate(self):
+        from retrieval.intent import classify_segment
+        seg = classify_segment(
+            "https://www.banquemisr.com/personal/cards/gold-credit-card",
+            "Gold Credit Card",
+            "Branches are open during business hours. Our company serves "
+            "commercial clients and business customers across the country.")
+        self.assertEqual(seg, "consumer")
+
+    def test_generic_page_with_corporate_words_stays_unknown(self):
+        from retrieval.intent import classify_segment
+        seg = classify_segment("https://www.banquemisr.com/home/pages/rewards",
+                               "BM Rewards",
+                               "business business commercial company enterprise")
+        self.assertEqual(seg, "unknown",
+                         "an unlabelled page must stay unknown; a wrong label "
+                         "is worse than no label because it triggers a penalty")
+
+    def test_url_path_still_drives_the_classification(self):
+        from retrieval.intent import classify_segment
+        self.assertEqual(classify_segment(
+            "https://www.banquemisr.com/corporate/cards/business-card", ""),
+            "corporate")
+        self.assertEqual(classify_segment(
+            "https://www.banquemisr.com/personal/accounts/current", ""),
+            "consumer")
+
+    def test_ambiguous_title_does_not_pick_a_side(self):
+        from retrieval.intent import classify_segment
+        self.assertEqual(classify_segment(
+            "https://www.banquemisr.com/home/pages/x",
+            "Personal and Business Banking"), "unknown")
+
+
+class TestPdfLanguageDerivation(unittest.TestCase):
+    """Real-corpus evidence: 242 of 1264 units had language 'unknown', closely
+    matching the 256 PDF units - pdf_documents.jsonl predates the language fix
+    and was never regenerated. Deriving language at index time fixes it without
+    touching the frozen corpus.
+    """
+
+    def _pdf_corpus(self, dirpath: Path, language: str) -> None:
+        dirpath.mkdir(parents=True, exist_ok=True)
+        (dirpath / "documents.jsonl").write_text("", encoding="utf-8")
+        text_en = ("Tariff of fees and commissions. The annual fee for the gold "
+                   "card is EGP 350 and eligibility requires proof of income.")
+        text_ar = ("تعريفة الرسوم والعمولات الرسوم السنوية للبطاقة الذهبية "
+                   "350 جنيه مصري وشروط الاستحقاق تتطلب اثبات الدخل")
+        (dirpath / "pdf_documents.jsonl").write_text(json.dumps({
+            "url": BASE + "docs/tariff.pdf", "source_url": BASE + "docs/tariff.pdf",
+            "title": "tariff.pdf",
+            "language": "unknown",        # stale value from Phase 1
+            "text": text_ar if language == "ar" else text_en,
+            "pdf_pages": 1, "doc_type": "pdf", "needs_ocr": False,
+            "fetched_at": "2026-08-18T00:00:00Z"}, ensure_ascii=False) + "\n",
+            encoding="utf-8")
+
+    def test_stale_unknown_is_replaced_by_script_detection(self):
+        for lang in ("en", "ar"):
+            with tempfile.TemporaryDirectory() as tmp:
+                corpus = Path(tmp) / "corpus"
+                self._pdf_corpus(corpus, lang)
+                recs = load_all(corpus)
+                self.assertTrue(recs)
+                self.assertTrue(all(r.language == lang for r in recs),
+                                f"expected {lang}, got "
+                                f"{[r.language for r in recs]}")
+
+    def test_a_real_language_label_is_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = Path(tmp) / "corpus"
+            self._pdf_corpus(corpus, "en")
+            raw = (corpus / "pdf_documents.jsonl").read_text(encoding="utf-8")
+            (corpus / "pdf_documents.jsonl").write_text(
+                raw.replace('"language": "unknown"', '"language": "ar"'),
+                encoding="utf-8")
+            recs = load_all(corpus)
+            self.assertTrue(all(r.language == "ar" for r in recs))
+
+
+class TestSegmentPenaltyOnlyAppliesToLabelledRecords(RetrievalEvalFixture):
+    def test_unknown_segment_is_never_penalised(self):
+        hits = self.r.retrieve(
+            "What are the eligibility requirements for a credit card?",
+            top_k=10, max_per_document=99)
+        for h in hits:
+            if h["segment"] == "unknown":
+                self.assertNotIn("segment_mismatch", h["boosts"])

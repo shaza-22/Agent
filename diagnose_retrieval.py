@@ -11,7 +11,9 @@ from __future__ import annotations
 import argparse
 
 from retrieval import Retriever
-from retrieval.diagnostics import (compare_modes, index_overview, topic_report)
+from retrieval.diagnostics import (compare_modes, duplicate_report, explain_query,
+                                   health_check, index_overview, show_records,
+                                   topic_report)
 
 TEST_QUERIES = [
     "What are the eligibility requirements for a Banque Misr credit card?",
@@ -42,12 +44,36 @@ def main() -> None:
     ap.add_argument("--overview", action="store_true")
     ap.add_argument("--content-check", action="store_true")
     ap.add_argument("--compare", action="store_true")
+    ap.add_argument("--explain", action="store_true",
+                    help="full scoring breakdown for the top-N candidates")
+    ap.add_argument("--depth", type=int, default=20)
+    ap.add_argument("--show", metavar="REGEX",
+                    help="print the full text of records matching a pattern")
+    ap.add_argument("--health", action="store_true",
+                    help="flag metadata distributions that indicate a bug")
+    ap.add_argument("--duplicates", action="store_true",
+                    help="records with identical text (Sitecore URL variants)")
     ap.add_argument("--query", action="append", default=None)
     ap.add_argument("--top-k", type=int, default=5)
     ap.add_argument("--language", choices=["en", "ar"], default=None)
     args = ap.parse_args()
 
     r = Retriever(args.index_dir)
+    if args.show:
+        show_records(r, args.show, limit=args.top_k or 10)
+        return
+    if args.health:
+        raise SystemExit(1 if health_check(r) else 0)
+    if args.duplicates:
+        duplicate_report(r)
+        return
+    if args.explain:
+        for q in (args.query or TEST_QUERIES):
+            lang = args.language or ("ar" if any("\u0600" <= c <= "\u06ff" for c in q)
+                                     else None)
+            explain_query(r, q, depth=args.depth, language=lang)
+        return
+
     if not (args.overview or args.content_check or args.compare):
         args.overview = args.content_check = args.compare = True
 

@@ -19,6 +19,15 @@ from pathlib import Path
 
 from .intent import classify_page, classify_segment
 
+try:      # config lives in the Phase 1 package; retrieval must not hard-depend on it
+    import sys as _sys
+    from pathlib import Path as _P
+    _sys.path.insert(0, str(_P(__file__).resolve().parents[1] / "data_pipeline"))
+    from config import detect_language
+except Exception:                                            # noqa: BLE001
+    def detect_language(url, html_lang=None, text=None, meta_lang=None):
+        return "unknown"
+
 # Paragraph-ish split for PDF text: blank lines, or a newline before something
 # that looks like a new clause. PDFs have no headings to split on.
 _PARA_SPLIT = re.compile(r"\n\s*\n+")
@@ -212,7 +221,12 @@ def load_pdf_records(path: Path, min_words: int = 8,
                 title=title,
                 section_heading=f"page ~{page}" if page else f"chunk {i + 1}",
                 text=f"{title}\n{chunk}",
-                language=doc.get("language", "unknown"),
+                # Re-derive from the chunk text rather than trusting the
+                # attachment record: pdf_documents.jsonl predates the language
+                # fix, so its `language` is stale "unknown" for every PDF.
+                # Deriving here needs no re-ingest of the frozen corpus.
+                language=(doc.get("language") if doc.get("language") in ("en", "ar")
+                          else detect_language(url, text=chunk)),
                 document_type="pdf",
                 citation=url,
                 pdf_page=page,

@@ -114,6 +114,25 @@ first-class outcome instead of the agent citing whatever ranked first. Each
 result also carries `confidence` (0–1). **The threshold is not portable** —
 cosine scales differ per model, so calibrate it on your own corpus.
 
+## Metadata classification (v0.3)
+
+Two classifier bugs found from the real index's distribution, not from tuning:
+
+**Segment over-triggered.** 637 of 1264 units were labelled `corporate` against
+only 88 `consumer`, because `classify_segment` scanned page *body text* and
+returned corporate when corporate-ish words appeared twice — "business hours",
+"our company" on a retail page was enough. Since the ranker penalises corporate
+results on personal questions, this demoted half the corpus and let the 539
+unlabelled generic pages float to the top. Classification is now driven by the
+**URL path** (the only per-page signal the site controls), falling back to an
+unambiguous title. Everything else stays `unknown`, which carries **no
+penalty** — a wrong label is worse than no label.
+
+**PDF language was stale.** 242 units had `language: unknown`, closely matching
+the 256 PDF units: `pdf_documents.jsonl` predates the language fix and was never
+regenerated. Language is now derived from the chunk text at index time, so the
+frozen corpus does not need re-ingesting.
+
 ## Diagnostics
 
 ```bash
@@ -122,8 +141,21 @@ python diagnose_retrieval.py --content-check   # does the answer EXIST?
 python diagnose_retrieval.py --compare         # dense vs bm25 vs hybrid, top 5
 ```
 
+```bash
+python diagnose_retrieval.py --health          # metadata distributions that signal a bug
+python diagnose_retrieval.py --explain         # full scoring breakdown, top 20
+python diagnose_retrieval.py --show 'annual fee'   # read the matching records
+python diagnose_retrieval.py --duplicates      # surviving Sitecore URL variants
+```
+
 `--content-check` matters most: reranking cannot surface a section the crawl
 never captured. Run it before treating a bad result as a ranking problem.
+`--show` goes further — a match count says a term appears, but only reading the
+records says whether they answer the question.
+
+`--health` exits non-zero on warnings, so it can gate a rebuild. It catches what
+no offline fixture can: a classifier that mislabels half the corpus, a language
+tagger that gives up on a document type, or duplicate text from URL variants.
 
 ## Offline fallback
 

@@ -15,6 +15,7 @@ No LLM, no API. Rules only - this is Phase 2.
 from __future__ import annotations
 
 import re
+from urllib.parse import urlparse
 
 # --- page type, from URL and title -----------------------------------------
 # News/press/about pages dominate lexical search for product queries because
@@ -58,19 +59,32 @@ def classify_page(url: str, title: str = "", breadcrumbs: str = "") -> str:
 
 
 def classify_segment(url: str, title: str = "", text: str = "") -> str:
-    """consumer | corporate | unknown - so business cards stop answering
-    questions about personal ones."""
-    head = f"{url} {title}"
-    if _CORPORATE_PAT.search(head):
+    """consumer | corporate | unknown, decided from the URL PATH only.
+
+    An earlier version also scanned page body text and returned `corporate`
+    when corporate-ish words appeared twice. On the real corpus that labelled
+    637 of 1264 units corporate against only 88 consumer - a retail card page
+    saying "business hours" or "our company" was enough to flip it. Because the
+    ranker penalises corporate results on personal questions, that demoted half
+    the corpus and let unclassified generic pages float to the top.
+
+    The URL path is the only signal the site actually controls per-page
+    (/corporate/..., /personal/...), so it is the only one trusted here.
+    Everything else stays `unknown`, which carries no penalty - a wrong label
+    is worse than no label.
+    """
+    path = urlparse(url).path if "://" in url else url
+    if _CORPORATE_PAT.search(path):
         return "corporate"
-    if _CONSUMER_PAT.search(head):
+    if _CONSUMER_PAT.search(path):
         return "consumer"
-    # Fall back to the body, but only on a clear imbalance.
-    corp = len(_CORPORATE_PAT.findall(text or ""))
-    cons = len(_CONSUMER_PAT.findall(text or ""))
-    if corp >= 2 and corp > cons * 2:
+    # A title is weaker than a path but still page-specific; require it to be
+    # unambiguous (exactly one side present).
+    corp_t = bool(_CORPORATE_PAT.search(title or ""))
+    cons_t = bool(_CONSUMER_PAT.search(title or ""))
+    if corp_t and not cons_t:
         return "corporate"
-    if cons >= 2 and cons > corp * 2:
+    if cons_t and not corp_t:
         return "consumer"
     return "unknown"
 
