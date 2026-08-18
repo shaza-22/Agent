@@ -17,6 +17,8 @@ import re
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
+from .intent import classify_page, classify_segment
+
 # Paragraph-ish split for PDF text: blank lines, or a newline before something
 # that looks like a new clause. PDFs have no headings to split on.
 _PARA_SPLIT = re.compile(r"\n\s*\n+")
@@ -39,6 +41,11 @@ class RetrievalRecord:
     chunk_index: int = 0           # position within its parent document
     section_level: int = 0         # h1..h6, for HTML
     word_count: int = 0
+    # Metadata for ranking. Derived from URL/title/heading, never from the
+    # embedding - so it costs nothing and stays stable across model changes.
+    page_type: str = "other"       # product | news | about | other
+    segment: str = "unknown"       # consumer | corporate | unknown
+    has_table: bool = False        # section carries a fee/rate table
     extra: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -95,6 +102,7 @@ def load_html_records(path: Path, min_words: int = 8) -> list[RetrievalRecord]:
             # is unmatchable without "Gold Card" attached to it.
             embed_text = f"{title} - {heading}\n{text}" if heading else f"{title}\n{text}"
             anchor = sec.get("anchor")
+            crumbs = " ".join(doc.get("breadcrumbs") or [])
             out.append(RetrievalRecord(
                 chunk_id=_chunk_id(url, "html", i, text),
                 source_url=url,
@@ -109,6 +117,9 @@ def load_html_records(path: Path, min_words: int = 8) -> list[RetrievalRecord]:
                 chunk_index=i,
                 section_level=int(sec.get("level") or 0),
                 word_count=len(text.split()),
+                page_type=classify_page(url, title, crumbs),
+                segment=classify_segment(url, title, doc.get("text", "")),
+                has_table=bool(table_md) and i == 0,
             ))
     return out
 
@@ -207,6 +218,9 @@ def load_pdf_records(path: Path, min_words: int = 8,
                 pdf_page=page,
                 chunk_index=i,
                 word_count=len(chunk.split()),
+                page_type="product",   # tariff/rate attachments are product data
+                segment=classify_segment(url, title, chunk),
+                has_table=bool(re.search(r"\|.*\|", chunk)),
                 extra={"page_is_estimated": bool(page),
                        "attachment_kind": doc.get("attachment_kind")},
             ))

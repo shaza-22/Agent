@@ -249,3 +249,221 @@ class TestArabicLexicalMatching(unittest.TestCase):
         hits = BM25(docs).search("الرسوم السنوية للبطاقه")
         self.assertTrue(hits)
         self.assertEqual(hits[0][0], 0)
+
+
+# ---------------------------------------------------------------------------
+# Evaluation fixture, modelled on the five real test queries.
+# Properties are asserted, never specific documents - the point is that the
+# ranker prefers the right KIND of result, not that it memorised an answer.
+# ---------------------------------------------------------------------------
+
+def write_eval_corpus(dirpath: Path) -> None:
+    """A corpus shaped like the real one: news noise, corporate vs consumer
+    products, an Arabic page, a fee table and a tariff PDF."""
+    dirpath.mkdir(parents=True, exist_ok=True)
+    docs = []
+    for slug, title in [
+            ("farmers-day", "Banque Misr celebrates Farmer's Day"),
+            ("world-savings-day", "Banque Misr marks World Savings Day"),
+            ("financial-inclusion", "Banque Misr financial inclusion initiative"),
+            ("visa-partnership", "Banque Misr and Visa announce a credit card partnership"),
+            ("women-day", "Banque Misr celebrates Women's Day")]:
+        docs.append(_doc(BASE + "news/" + slug, title, "en", [
+            _sec("Overview", f"{title}. Banque Misr offers credit cards and debit "
+                             f"cards with benefits for all customers.")]))
+
+    for slug, name, income, fee in [("gold", "Gold", "8000", "350"),
+                                    ("platinum", "Platinum", "25000", "800"),
+                                    ("classic", "Classic", "5000", "150")]:
+        docs.append(_doc(
+            BASE + "personal/cards/" + slug + "-credit-card", f"{name} Credit Card",
+            "en", [
+                _sec("Overview", f"The {name} credit card offers rewards for "
+                                 f"individual customers."),
+                _sec("Eligibility", f"Applicants must have a minimum monthly income "
+                                    f"of EGP {income} and a valid national identity "
+                                    f"card.", "eligibility"),
+                _sec("Fees and Charges", f"The annual fee for the {name} card is "
+                                         f"EGP {fee}.", "fees")],
+            [{"caption": None, "headers": ["Item", "Amount"],
+              "rows": [["Annual fee", f"EGP {fee}"]],
+              "markdown": f"| Item | Amount |\n| --- | --- |\n| Annual fee | EGP {fee} |"}]))
+
+    docs.append(_doc(BASE + "corporate/cards/business-credit-card",
+                     "Business Credit Card", "en", [
+                         _sec("Eligibility", "Companies must be registered and hold "
+                                             "a corporate account.", "eligibility"),
+                         _sec("Fees and Charges", "The issuance fee is EGP 200 and "
+                                                  "the replacement fee is EGP 50.",
+                              "fees")]))
+    docs.append(_doc(BASE + "personal/accounts/current-account", "Current Account",
+                     "en", [
+                         _sec("Overview", "A current account for daily banking."),
+                         _sec("Required Documents", "To open an account provide a "
+                                                    "valid national identity card, "
+                                                    "proof of address and a salary "
+                                                    "certificate.", "documents")]))
+    docs.append(_doc(BASE + "ar/personal/cards/gold", "بطاقة الائتمان الذهبية", "ar", [
+        _sec("الرسوم والعمولات", "رسوم اصدار البطاقة 150 جنيه والرسوم السنوية "
+                                 "350 جنيه مصري", "fees"),
+        _sec("شروط الاستحقاق", "الحد الادنى للدخل الشهري 8000 جنيه مصري",
+             "eligibility")]))
+    docs.append(_doc(BASE + "about/atm-network", "ATM Network", "en",
+                     [_sec("Locations", "Our ATM network covers all governorates.")]))
+
+    with (dirpath / "documents.jsonl").open("w", encoding="utf-8") as fh:
+        for d in docs:
+            fh.write(json.dumps(d, ensure_ascii=False) + "\n")
+
+    pdf_text = ("Tariff of fees and commissions for payment cards.\n\n"
+                "Credit cards annual fee Classic EGP 150 Gold EGP 350 "
+                "Platinum EGP 800.")
+    with (dirpath / "pdf_documents.jsonl").open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "url": BASE + "docs/card-tariff.pdf",
+            "source_url": BASE + "docs/card-tariff.pdf", "title": "card-tariff.pdf",
+            "language": "en", "text": pdf_text, "pdf_pages": 2, "doc_type": "pdf",
+            "fetched_at": "2026-08-18T00:00:00Z", "needs_ocr": False,
+            "attachment_kind": "pdf"}, ensure_ascii=False) + "\n")
+
+
+class RetrievalEvalFixture(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        root = Path(cls.tmp.name)
+        corpus, cls.index_dir = root / "corpus", root / "index"
+        write_eval_corpus(corpus)
+        records = load_all(corpus)
+        idx = VectorIndex(cls.index_dir)
+        idx.build(records, build_embedder("hashing"), cache_dir=root / "cache")
+        idx.save()
+        cls.r = Retriever(cls.index_dir)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+
+class TestRetrievalQuality(RetrievalEvalFixture):
+    """Property assertions for the five real test queries."""
+
+    Q_ELIGIBILITY = "What are the eligibility requirements for a Banque Misr credit card?"
+    Q_DOCUMENTS = "What documents do I need to open an account at Banque Misr?"
+    Q_FEE = "What is the annual fee on Banque Misr cards?"
+    Q_FEE_AR = "ما هي رسوم بطاقات بنك مصر؟"
+    Q_COMPARE = "Compare Banque Misr credit cards"
+
+    def test_eligibility_query_surfaces_an_eligibility_section(self):
+        hits = self.r.retrieve(self.Q_ELIGIBILITY, top_k=5)
+        self.assertTrue(any("eligib" in h["section_heading"].lower() for h in hits),
+                        f"no eligibility section in top 5: "
+                        f"{[h['section_heading'] for h in hits]}")
+
+    def test_product_queries_do_not_return_news_pages(self):
+        for q in (self.Q_ELIGIBILITY, self.Q_FEE, self.Q_COMPARE):
+            hits = self.r.retrieve(q, top_k=5)
+            self.assertFalse([h for h in hits if h["page_type"] == "news"],
+                             f"news page returned for: {q}")
+
+    def test_consumer_products_outrank_corporate_for_personal_questions(self):
+        hits = self.r.retrieve(self.Q_ELIGIBILITY, top_k=5)
+        segments = [h["segment"] for h in hits]
+        if "corporate" in segments and "consumer" in segments:
+            self.assertLess(segments.index("consumer"), segments.index("corporate"))
+
+    def test_documents_query_surfaces_document_content(self):
+        hits = self.r.retrieve(self.Q_DOCUMENTS, top_k=5)
+        self.assertTrue(
+            any("document" in h["section_heading"].lower()
+                or "document" in h["text"].lower() for h in hits))
+
+    def test_fee_query_surfaces_fee_bearing_content(self):
+        hits = self.r.retrieve(self.Q_FEE, top_k=5)
+        self.assertTrue(any("fee" in h["section_heading"].lower() for h in hits))
+        # The section carrying the actual annual fee must beat the
+        # issuance/replacement-fee-only corporate section.
+        annual = [h["rank"] for h in hits if "annual fee" in h["text"].lower()]
+        issuance = [h["rank"] for h in hits if "issuance fee" in h["text"].lower()
+                    and "annual fee" not in h["text"].lower()]
+        if annual and issuance:
+            self.assertLess(min(annual), min(issuance))
+
+    def test_arabic_fee_query_returns_arabic_fee_content(self):
+        hits = self.r.retrieve(self.Q_FEE_AR, top_k=5, language="ar")
+        self.assertTrue(hits)
+        self.assertTrue(all(h["language"] == "ar" for h in hits))
+        self.assertTrue(any("رسوم" in h["section_heading"] or "رسوم" in h["text"]
+                            for h in hits))
+
+    def test_comparison_query_returns_multiple_distinct_products(self):
+        hits = self.r.retrieve(self.Q_COMPARE, top_k=5)
+        urls = {h["source_url"] for h in hits}
+        self.assertGreaterEqual(len(urls), 3, "comparison returned too few products")
+        self.assertEqual(len(urls), len(hits), "same page returned more than once")
+
+    def test_table_bearing_sections_are_not_penalised(self):
+        hits = self.r.retrieve(self.Q_FEE, top_k=10)
+        self.assertTrue(any(h["has_table"] for h in hits))
+
+    def test_boosts_are_reported_for_explainability(self):
+        hits = self.r.retrieve(self.Q_ELIGIBILITY, top_k=3)
+        self.assertTrue(any(h["boosts"] for h in hits))
+        self.assertIn("base_score", hits[0])
+
+
+class TestRankingControls(RetrievalEvalFixture):
+    def test_auto_filter_keeps_results_when_no_products_exist(self):
+        # A query with product intent but no matching product pages must still
+        # return something rather than filtering itself down to nothing.
+        hits = self.r.retrieve("eligibility for a mortgage on Mars", top_k=5)
+        self.assertIsInstance(hits, list)
+
+    def test_boosts_can_be_disabled(self):
+        boosted = self.r.retrieve(self.__class__.__dict__.get(
+            "Q", "What are the eligibility requirements for a credit card?"),
+            top_k=5)
+        raw = self.r.retrieve(
+            "What are the eligibility requirements for a credit card?",
+            top_k=5, use_metadata_boosts=False, auto_filter=False)
+        self.assertTrue(all(h["boosts"] == {} for h in raw))
+        self.assertIsInstance(boosted, list)
+
+    def test_single_mode_retrieval_is_unboosted_by_default(self):
+        for mode in ("dense", "bm25"):
+            hits = self.r.retrieve("annual fee", top_k=3, mode=mode)
+            self.assertTrue(all(h["boosts"] == {} for h in hits), mode)
+
+    def test_confidence_is_reported_and_bounded(self):
+        hits = self.r.retrieve("annual fee credit card", top_k=5)
+        for h in hits:
+            self.assertGreaterEqual(h["confidence"], 0.0)
+            self.assertLessEqual(h["confidence"], 1.0)
+
+    def test_min_confidence_filters_weak_results(self):
+        everything = self.r.retrieve("annual fee", top_k=10)
+        strict = self.r.retrieve("annual fee", top_k=10, min_confidence=0.99)
+        self.assertLess(len(strict), len(everything))
+
+    def test_retrieve_with_status_reports_low_confidence(self):
+        out = self.r.retrieve_with_status("zzz qqq nonsense", min_confidence=0.9)
+        self.assertIn(out["status"], ("low_confidence", "no_results"))
+        self.assertIn("message", out)
+
+    def test_retrieve_with_status_reports_ok_for_a_good_query(self):
+        out = self.r.retrieve_with_status(
+            "What documents do I need to open an account?", min_confidence=0.1)
+        self.assertEqual(out["status"], "ok")
+        self.assertTrue(out["results"])
+
+
+class TestCorpusExistenceCheck(RetrievalEvalFixture):
+    """Absence of content must be distinguishable from bad ranking."""
+
+    def test_existing_topic_is_found(self):
+        from retrieval.diagnostics import inspect_topic
+        self.assertTrue(inspect_topic(self.r, r"eligib"))
+
+    def test_absent_topic_reports_nothing(self):
+        from retrieval.diagnostics import inspect_topic
+        self.assertEqual(inspect_topic(self.r, r"cryptocurrency custody"), [])

@@ -53,7 +53,17 @@ def tokenize(text: str) -> list[str]:
 
 class BM25:
     def __init__(self, corpus_tokens: list[list[str]], k1: float = 1.5,
-                 b: float = 0.75):
+                 b: float = 0.4, boilerplate_df: float = 0.35,
+                 min_docs_for_df: int = 25):
+        """b defaults to 0.4, not the usual 0.75.
+
+        Length normalisation at 0.75 strongly favours short documents. On this
+        corpus that promotes one-paragraph news items ("Banque Misr launches a
+        new credit card") over the long sections that actually answer product
+        questions - and it penalises exactly the fee sections we most want,
+        because appending a fee table makes them longer. 0.4 keeps some
+        normalisation without handing the ranking to the shortest text.
+        """
         self.k1, self.b = k1, b
         self.n_docs = len(corpus_tokens)
         self.doc_len = [len(d) for d in corpus_tokens]
@@ -63,6 +73,19 @@ class BM25:
         df = Counter()
         for tokens in corpus_tokens:
             df.update(set(tokens))
+
+        # Site-wide boilerplate: terms on more than `boilerplate_df` of pages
+        # carry no discriminative signal ("banque", "misr", "bank", nav labels).
+        # Standard idf already shrinks them; this removes them outright so they
+        # cannot accumulate across many query terms into a spurious match.
+        #
+        # Only meaningful on a real corpus: with a handful of documents every
+        # term trivially exceeds any df threshold, which would suppress the
+        # entire vocabulary and return nothing.
+        self.boilerplate: set[str] = set()
+        if self.n_docs >= min_docs_for_df:
+            self.boilerplate = {t for t, n in df.items()
+                                if n / self.n_docs > boilerplate_df}
         # Standard BM25+ idf floor, so a term in almost every document cannot
         # contribute a negative score and drag a good match down.
         self.idf = {
@@ -71,7 +94,7 @@ class BM25:
         }
 
     def search(self, query: str, top_k: int = 20) -> list[tuple[int, float]]:
-        q_tokens = tokenize(query)
+        q_tokens = [t for t in tokenize(query) if t not in self.boilerplate]
         if not q_tokens or not self.n_docs:
             return []
         scores = [0.0] * self.n_docs

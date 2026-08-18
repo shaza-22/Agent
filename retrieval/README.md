@@ -63,6 +63,68 @@ lifecycle for no gain at this size.
 content hash and embedding-space fingerprint, so a rebuild re-embeds only what
 changed and switching models does not corrupt the cache.
 
+## Ranking (v0.2)
+
+A first run against the real corpus returned news pages for product questions.
+Two mechanisms, both fixed:
+
+1. **Plain RRF discards score magnitude.** Every list contributed
+   `1/(60+rank)` regardless of match quality, so a useless BM25 top-1 counted
+   exactly as much as an excellent dense top-1. Fusion is now weighted
+   (dense 1.0, BM25 0.55).
+2. **BM25 length normalisation at `b=0.75` favours short documents.** One-line
+   news items naming every product outranked the long sections that answer the
+   question — and it penalised fee sections precisely because appending a table
+   makes them longer. `b` is now 0.4, and terms appearing on more than 35% of
+   pages (site-wide branding and nav) are dropped from queries entirely.
+
+On top of that, ranking is metadata-aware:
+
+| Signal | Effect |
+| --- | --- |
+| Section heading matches query intent (`Eligibility`, `Fees`, `Required Documents`) | strong boost |
+| Page is news / about | strong penalty on product questions |
+| Corporate page, personal question (or vice-versa) | penalty |
+| Section carries a table, query asks about fees/rates | boost |
+| PDF attachment, query asks about fees | boost |
+
+Boosts are expressed in units of "ten ranks" (`BOOST_UNIT`) so the constants are
+interpretable, and every result reports the `boosts` applied plus its
+`base_score`, so a ranking can always be explained.
+
+When a query clearly asks about a product **and** enough product-type results
+exist to fill `top_k`, news and about pages are **filtered out**, not merely
+penalised — a boost can be outvoted by a strong base score. The guard matters:
+if the corpus cannot fill `top_k` with product pages they are kept, because a
+weak answer beats an empty one.
+
+Intents are rule-based (no LLM): `eligibility`, `documents`, `fees`, `rates`,
+`compare`, `benefits`, with Arabic cues alongside English. A `compare` query
+automatically drops to `max_per_document=1` so it spreads across products.
+
+## "No good result"
+
+```python
+out = retriever.retrieve_with_status(query, min_confidence=0.35)
+out["status"]   # ok | low_confidence | no_results
+```
+
+Phase 3 should call this rather than `retrieve`, so "I could not find this" is a
+first-class outcome instead of the agent citing whatever ranked first. Each
+result also carries `confidence` (0–1). **The threshold is not portable** —
+cosine scales differ per model, so calibrate it on your own corpus.
+
+## Diagnostics
+
+```bash
+python diagnose_retrieval.py --overview        # what is actually indexed
+python diagnose_retrieval.py --content-check   # does the answer EXIST?
+python diagnose_retrieval.py --compare         # dense vs bm25 vs hybrid, top 5
+```
+
+`--content-check` matters most: reranking cannot surface a section the crawl
+never captured. Run it before treating a bad result as a ranking problem.
+
 ## Offline fallback
 
 `--model hashing` selects a deterministic hashed bag-of-words embedder that
