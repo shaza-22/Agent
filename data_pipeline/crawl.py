@@ -20,7 +20,7 @@ from bs4 import BeautifulSoup
 
 import config
 import soft404
-from fetcher import Fetcher
+from fetcher import Fetcher, BlockedError
 
 
 def extract_links(html: str, base_url: str) -> list[str]:
@@ -85,7 +85,9 @@ def main() -> None:
     n_soft404 = 0
     unrendered = 0
 
+    blocked_stop = None
     with open(config.CRAWL_MANIFEST, "w", encoding="utf-8") as manifest:
+      try:
         while frontier and len(visited) < args.max_pages:
             url, depth, parent = frontier.popleft()
             if url in visited or depth > args.max_depth:
@@ -135,15 +137,22 @@ def main() -> None:
                 "outlinks": links,
                 "looks_unrendered": flag_unrendered,
                 "soft_404": is_soft,
+                "blocked": res.blocked,
             }, ensure_ascii=False) + "\n")
             manifest.flush()
 
             if len(visited) % 25 == 0:
                 print(f"[crawl] {len(visited)} pages, frontier={len(frontier)}")
+      except BlockedError as exc:
+        # Keep everything gathered so far; the manifest stays valid.
+        blocked_stop = str(exc)
 
     (config.RAW_DIR / "pdf_urls.json").write_text(
         json.dumps(sorted(attachment_urls), indent=2), encoding="utf-8"
     )
+    if blocked_stop:
+        print(f"\n[crawl] STOPPED EARLY - {blocked_stop}")
+        print("[crawl] What was fetched before the block is kept and valid.")
     print(f"[crawl] done: {len(visited)} URLs, "
           f"{len(attachment_urls)} attachments queued")
     if n_soft404:

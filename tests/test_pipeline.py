@@ -20,9 +20,10 @@ PAGE_URL = "https://www.banquemisr.com/en/personal/cards/credit-cards"
 
 class TestUrlRules(unittest.TestCase):
     def test_normalise_drops_fragment_tracking_and_trailing_slash(self):
+        # Path is lowercased: IIS/Sitecore treat paths case-insensitively.
         self.assertEqual(
             config.normalise_url("https://WWW.BanqueMisr.com/en/Personal/?utm_source=x#top"),
-            "https://www.banquemisr.com/en/Personal",
+            "https://www.banquemisr.com/en/personal",
         )
 
     def test_root_path_keeps_its_slash(self):
@@ -317,3 +318,80 @@ class TestSoft404Detection(unittest.TestCase):
         js = "<html><body>Please enable JavaScript to continue</body></html>"
         self.assertIn("js_required", soft404.classify_interstitial(js))
         self.assertEqual(soft404.classify_interstitial(self.REAL), [])
+
+
+class TestSitecoreUrlDeduplication(unittest.TestCase):
+    """One page must not become dozens of documents."""
+
+    HOME = "https://www.banquemisr.com/"
+
+    def test_csrt_session_token_is_stripped(self):
+        # Sitecore regenerates csrt per session: left in, the homepage alone
+        # appears under unlimited distinct URLs.
+        self.assertEqual(
+            config.normalise_url(self.HOME + "?csrt=8471926352817364521"), self.HOME)
+        self.assertEqual(
+            config.normalise_url(self.HOME + "?csrt=99&utm_source=x"), self.HOME)
+
+    def test_case_and_separator_variants_collapse(self):
+        variants = [
+            "https://WWW.BanqueMisr.com/EN/Personal",
+            "https://www.banquemisr.com/en/personal",
+            "https://www.banquemisr.com//en//personal/",
+            "https://www.banquemisr.com/en/personal/?csrt=1",
+        ]
+        self.assertEqual(len({config.normalise_url(v) for v in variants}), 1)
+
+    def test_percent_and_plus_encoding_converge(self):
+        a = config.normalise_url("https://www.banquemisr.com/Home/Pages/Fees%20And%20Charges")
+        b = config.normalise_url("https://www.banquemisr.com/Home/Pages/Fees+And+Charges")
+        self.assertEqual(a, b)
+
+    def test_query_param_order_does_not_create_duplicates(self):
+        self.assertEqual(config.normalise_url("https://www.banquemisr.com/x?b=2&a=1"),
+                         config.normalise_url("https://www.banquemisr.com/x?a=1&b=2"))
+
+    def test_meaningful_params_are_preserved(self):
+        # Only noise is dropped - a param that selects content must survive.
+        self.assertIn("page=2",
+                      config.normalise_url("https://www.banquemisr.com/news?page=2"))
+
+
+class TestBlockPageClassification(unittest.TestCase):
+    """A block page and a 404 page look alike and mean opposite things."""
+
+    BLOCK = ("<html><body>Access Denied - Banquemisr Something went wrong This "
+             "request has been temporarily blocked. This may occurs due to an "
+             "invalid link or suspicious activity. For assistance, please contact "
+             "our Call Center and quote your support ID: Support ID: "
+             "12698372880110460572 Go Back</body></html>")
+    NOT_FOUND = ("<html><body><h1>Page Not Found</h1><p>The page you requested "
+                 "could not be found.</p></body></html>")
+    REAL = ("<html><body><main><h1>Cards</h1><p>Gold card annual fee EGP 350 "
+            "and eligibility criteria.</p></main></body></html>")
+
+    def test_f5_block_page_is_classified_as_blocked_not_not_found(self):
+        import soft404
+        self.assertEqual(soft404.classify_response(self.BLOCK), "blocked")
+        self.assertTrue(soft404.looks_blocked(self.BLOCK))
+        # The critical distinction: never mistaken for a missing page.
+        self.assertFalse(soft404.looks_like_not_found(self.BLOCK))
+        self.assertIn("f5_asm_block", soft404.classify_interstitial(self.BLOCK))
+
+    def test_not_found_is_not_treated_as_a_block(self):
+        import soft404
+        self.assertEqual(soft404.classify_response(self.NOT_FOUND), "not_found")
+        self.assertFalse(soft404.looks_blocked(self.NOT_FOUND))
+
+    def test_real_content_is_neither(self):
+        import soft404
+        self.assertEqual(soft404.classify_response(self.REAL), "content")
+
+    def test_block_page_never_becomes_a_soft404_fingerprint(self):
+        import soft404
+        # A probe that was blocked tells us nothing about whether the URL
+        # exists, so it must not seed the not-found fingerprint.
+        fp = {"detected": False, "hashes": [], "blocked": True,
+              "block_hashes": [soft404.text_hash(self.BLOCK)]}
+        self.assertTrue(soft404.is_blocked_fingerprint(self.BLOCK, fp))
+        self.assertFalse(soft404.is_soft_404(self.BLOCK, fp))

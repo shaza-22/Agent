@@ -78,7 +78,8 @@ records where it all came from.
 | `import_local.py` | Ingests an existing `wget` mirror instead of crawling | mirror dir | `data/raw/` |
 | `refetch.py` | Re-fetches specific URLs only, no full re-crawl | URL list/regex | updated `data/raw/` |
 | `diagnose.py` | Manifest vs bytes on disk; `--fingerprint` finds template pages | manifest | stdout table |
-| `soft404.py` | Learns the site's not-found template so guessed URLs are excluded | live site | `data/raw/soft404.json` |
+| `soft404.py` | Classifies responses: content / not_found / blocked / interstitial | live site | `data/raw/soft404.json` |
+| `blockcheck.py` | Diagnoses *why* the site is blocking, in 4 spaced probes | live site | verdict + the setting to change |
 
 ## Configuration
 
@@ -173,6 +174,41 @@ Note that attachments land in `data/corpus/pdf_documents.jsonl`, *not*
 ```bash
 cat data/corpus/*.jsonl | grep -ic "annual fee"
 ```
+
+## If the site blocks you
+
+Banque Misr fronts its site with F5 BIG-IP ASM, whose block page is short and
+custom — an apology plus `Support ID: <digits>`. It returns **HTTP 200**, so it
+is easily mistaken for a 404 template or for real (if thin) content.
+
+The pipeline treats a block as a stop condition, never as data:
+
+- `fetcher.py` detects block pages, backs off exponentially, and raises
+  `BlockedError` after `BM_MAX_BLOCKS` (default 3) consecutive blocks
+- `crawl.py` stops cleanly, keeping everything gathered before the block
+- `extract.py` refuses to turn a block page into a citable document
+- `render.py` discards blocked pages rather than storing them
+
+```bash
+python blockcheck.py     # 4 probes, 30s apart: rate limit? headless? IP block?
+```
+
+It distinguishes the causes because the fixes are mutually exclusive — slowing
+down does nothing against fingerprinting, and browser flags do nothing against
+a rate limit. Pacing knobs: `BM_DELAY`, `BM_JITTER`, `BM_RENDER_DELAY`
+(renders are far heavier than plain GETs and get their own slower cadence).
+
+**No stealth or evasion tooling.** If a production bank deliberately refuses
+automated traffic, the answer is to slow down, or to ask them — not to defeat
+the control.
+
+## Sitecore URL variants
+
+One page can wear dozens of URLs. `csrt` is a per-session anti-CSRF token, so
+the homepage alone appeared under 66+ variants in a real run. `normalise_url`
+strips session/tracking params, sorts the rest, collapses duplicate slashes,
+normalises percent-encoding, and lowercases the path (IIS/Sitecore are
+case-insensitive; set `BM_CASE_SENSITIVE_PATHS=1` for a case-sensitive origin).
 
 ## Soft 404s (why guessed URLs are dangerous)
 

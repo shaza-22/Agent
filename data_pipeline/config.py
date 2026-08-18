@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from urllib.parse import urlparse, urldefrag, urlunparse
+from urllib.parse import urlparse, urldefrag, urlunparse, unquote_plus, quote
 
 # --- Target -----------------------------------------------------------------
 BASE_URL = os.environ.get("BM_BASE_URL", "https://www.banquemisr.com")
@@ -25,6 +25,16 @@ ALLOWED_HOSTS = {
 # One worker, one request at a time, with a delay. This is a public bank site:
 # being slow and boring is a feature, not a limitation.
 REQUEST_DELAY_SEC = float(os.environ.get("BM_DELAY", "1.5"))
+# Random extra wait added to every request. A perfectly regular 1.5s cadence is
+# itself a bot signature; jitter makes the traffic look less machine-timed and
+# spreads load. Cost is negligible, so it is on by default.
+REQUEST_JITTER_SEC = float(os.environ.get("BM_JITTER", "1.0"))
+# Headless-browser renders are far heavier than a plain GET (each pulls every
+# subresource), so they get their own, slower pacing.
+RENDER_DELAY_SEC = float(os.environ.get("BM_RENDER_DELAY", "5.0"))
+# Consecutive block pages before the run stops. Continuing past a block just
+# fills the corpus with block pages and deepens whatever triggered it.
+MAX_CONSECUTIVE_BLOCKS = int(os.environ.get("BM_MAX_BLOCKS", "3"))
 REQUEST_TIMEOUT_SEC = float(os.environ.get("BM_TIMEOUT", "30"))
 MAX_RETRIES = int(os.environ.get("BM_MAX_RETRIES", "3"))
 MAX_PAGES = int(os.environ.get("BM_MAX_PAGES", "3000"))
@@ -65,8 +75,21 @@ SKIP_URL_PATTERNS = [
 
 # Query params that change nothing about the content; dropped during
 # normalisation so the same page is not crawled under 10 different URLs.
-DROP_QUERY_PARAMS = {"utm_source", "utm_medium", "utm_campaign", "utm_term",
-                     "utm_content", "fbclid", "gclid", "ref", "_ga"}
+DROP_QUERY_PARAMS = {
+    # Marketing / analytics
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "fbclid", "gclid", "ref", "_ga", "_gl", "mc_cid", "mc_eid",
+    # Sitecore: csrt is a per-session anti-CSRF token regenerated on every
+    # visit, so the same page appears under unlimited distinct URLs. Left in,
+    # it multiplies the corpus with byte-identical duplicates.
+    "csrt", "sc_camp", "sc_trk", "sc_device", "sc_debug", "sc_prof",
+    "sc_ritm", "sc_rb", "cshid", "timestamp", "_t",
+}
+
+# IIS/Sitecore treat paths case-insensitively, so /EN/Personal and /en/personal
+# are one page. Set BM_CASE_SENSITIVE_PATHS=1 for a case-sensitive origin
+# (nginx/apache on Linux), where lowercasing would merge genuinely distinct URLs.
+CASE_SENSITIVE_PATHS = os.environ.get("BM_CASE_SENSITIVE_PATHS", "0") == "1"
 
 PDF_PATTERN = re.compile(r"\.pdf(\?|$)", re.I)
 
@@ -156,19 +179,42 @@ def sniff_kind(content_type: str, head: bytes) -> tuple[str, str]:
 def normalise_url(url: str) -> str:
     """Canonicalise a URL so the same page is only ever crawled once.
 
-    Drops the fragment, lowercases the host, strips tracking params and
-    removes a trailing slash (except on the site root).
+    Handles every way one page can wear many URLs:
+      - fragment dropped, host lowercased
+      - session/tracking params stripped (Sitecore `csrt` above all)
+      - remaining params sorted, so ?a=1&b=2 and ?b=2&a=1 are one URL
+      - duplicate slashes collapsed, trailing slash removed
+      - percent-encoding normalised (%20 and + both become a literal space
+        before re-encoding, so the three spellings of a path converge)
+      - path lowercased unless CASE_SENSITIVE_PATHS is set
+
+    Without this, one page reachable under dozens of variants becomes dozens of
+    byte-identical documents that compete with each other in retrieval.
     """
     url, _ = urldefrag(url.strip())
     p = urlparse(url)
     host = p.netloc.lower()  # keeps any explicit port, which stays part of the identity
-    query = "&".join(
-        part for part in p.query.split("&")
-        if part and part.split("=")[0] not in DROP_QUERY_PARAMS
-    )
-    path = p.path or "/"
+
+    # Query: drop noise, keep order stable.
+    kept = []
+    for part in p.query.split("&"):
+        if not part:
+            continue
+        name = part.split("=")[0]
+        if name.lower() in DROP_QUERY_PARAMS:
+            continue
+        kept.append(part)
+    query = "&".join(sorted(kept))
+
+    # Path: decode -> collapse -> re-encode, so spelling variants converge.
+    path = unquote_plus(p.path or "/")
+    path = re.sub(r"/{2,}", "/", path)
     if len(path) > 1 and path.endswith("/"):
         path = path.rstrip("/")
+    if not CASE_SENSITIVE_PATHS:
+        path = path.lower()
+    path = quote(path, safe="/:@!$&'()*+,;=~-._")
+
     return urlunparse((p.scheme.lower(), host, path, p.params, query, ""))
 
 

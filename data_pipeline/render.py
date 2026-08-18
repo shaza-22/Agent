@@ -82,6 +82,7 @@ def render_urls(urls: list[str], wait_ms: int = 2500,
 
     results: dict[str, dict] = {}
     failures: list[tuple[str, str]] = []
+    blocked_urls: list[str] = []
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=headless)
@@ -96,6 +97,7 @@ def render_urls(urls: list[str], wait_ms: int = 2500,
         )
         page = ctx.new_page()
         consent_hits: dict[str, int] = {}
+        consecutive_blocks = 0
         for i, url in enumerate(urls, 1):
             try:
                 page.goto(url, timeout=int(config.REQUEST_TIMEOUT_SEC * 1000),
@@ -118,6 +120,12 @@ def render_urls(urls: list[str], wait_ms: int = 2500,
                 results[url] = {"html": html,
                                 "final_url": config.normalise_url(page.url),
                                 "words_after": word_count(html)}
+                if soft404.looks_blocked(html):
+                    consecutive_blocks += 1
+                    blocked_urls.append(url)
+                    results.pop(url, None)   # never store a block page as content
+                else:
+                    consecutive_blocks = 0
                 flags = soft404.classify_interstitial(html)
                 note = f"  [{','.join(flags)}]" if flags else ""
                 print(f"[render] {i}/{len(urls)} {results[url]['words_after']:>5}w  "
@@ -125,9 +133,20 @@ def render_urls(urls: list[str], wait_ms: int = 2500,
             except Exception as exc:                           # noqa: BLE001
                 failures.append((url, str(exc).splitlines()[0][:120]))
                 print(f"[render] {i}/{len(urls)} FAILED {url}: {exc}".splitlines()[0])
-            time.sleep(config.REQUEST_DELAY_SEC)
+            time.sleep(config.RENDER_DELAY_SEC)
+
+            # Stop early rather than grinding through a block.
+            if consecutive_blocks >= config.MAX_CONSECUTIVE_BLOCKS:
+                print(f"\n[render] STOPPING: {consecutive_blocks} consecutive block "
+                      f"pages. The site is refusing this browser. Nothing further "
+                      f"would be usable. Run: python blockcheck.py")
+                break
         browser.close()
 
+    if blocked_urls:
+        print(f"\n[render] {len(blocked_urls)} pages returned a BLOCK page and were "
+              f"NOT stored. This is not a rendering problem - the site refused "
+              f"the request. Run: python blockcheck.py")
     if consent_hits:
         print(f"[render] dismissed consent banners: {consent_hits}")
     if failures:

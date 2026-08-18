@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import time
 import urllib.robotparser as robotparser
 from dataclasses import dataclass, asdict
@@ -20,6 +21,10 @@ from pathlib import Path
 import requests
 
 import config
+
+
+class BlockedError(RuntimeError):
+    """Raised when the site is consistently refusing this client."""
 
 
 @dataclass
@@ -33,9 +38,11 @@ class FetchResult:
     from_cache: bool
     error: str | None = None
     kind: str = "html"   # html | pdf | image | office_or_zip | office_legacy | rtf | other
+    blocked: bool = False
 
     def ok(self) -> bool:
-        return self.error is None and 200 <= self.status < 300
+        return (self.error is None and 200 <= self.status < 300
+                and not self.blocked)
 
 
 def url_key(url: str) -> str:
@@ -58,6 +65,7 @@ class Fetcher:
             "Accept-Language": "en,ar;q=0.8",
         })
         self._last_request = 0.0
+        self._consecutive_blocks = 0
         self._robots = self._load_robots()
 
     # -- robots -------------------------------------------------------------
@@ -95,9 +103,10 @@ class Fetcher:
 
     # -- fetching -----------------------------------------------------------
     def _throttle(self) -> None:
+        wait = config.REQUEST_DELAY_SEC + random.uniform(0, config.REQUEST_JITTER_SEC)
         elapsed = time.time() - self._last_request
-        if elapsed < config.REQUEST_DELAY_SEC:
-            time.sleep(config.REQUEST_DELAY_SEC - elapsed)
+        if elapsed < wait:
+            time.sleep(wait - elapsed)
         self._last_request = time.time()
 
     def fetch(self, url: str, *, binary: bool | None = None) -> FetchResult:
@@ -145,6 +154,25 @@ class Fetcher:
                 elif binary is False:
                     kind, ext = "html", ".html"
 
+                # A block page is a 200 with an apology in it. Detect it before
+                # storing, or the corpus quietly fills with "Access Denied".
+                blocked = False
+                if kind == "html":
+                    import soft404
+                    blocked = soft404.looks_blocked(resp.text)
+                    if blocked:
+                        self._consecutive_blocks += 1
+                        if self._consecutive_blocks >= config.MAX_CONSECUTIVE_BLOCKS:
+                            raise BlockedError(
+                                f"{self._consecutive_blocks} consecutive block pages "
+                                f"(last: {url}). The site is refusing this client. "
+                                f"Stop, wait, and run blockcheck.py - do not keep "
+                                f"fetching.")
+                        # Back off hard before the next attempt.
+                        time.sleep(min(60, 5 * 2 ** self._consecutive_blocks))
+                    else:
+                        self._consecutive_blocks = 0
+
                 raw_path = self.pages_dir / f"{key}{ext}"
                 if kind == "html":
                     raw_path.write_text(resp.text, encoding="utf-8")
@@ -160,6 +188,7 @@ class Fetcher:
                     fetched_at=_now(),
                     from_cache=False,
                     kind=kind,
+                    blocked=blocked,
                 )
                 meta = asdict(result)
                 meta["from_cache"] = False

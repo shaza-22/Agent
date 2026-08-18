@@ -204,7 +204,7 @@ def main() -> None:
         raise SystemExit(f"no manifest at {config.CRAWL_MANIFEST}; run crawl.py first")
 
     soft_fp = soft404.load()
-    kept = dropped = n_soft = 0
+    kept = dropped = n_soft = n_blocked = 0
     with open(config.CORPUS_FILE, "w", encoding="utf-8") as out:
         for line in open(config.CRAWL_MANIFEST, encoding="utf-8"):
             rec = json.loads(line)
@@ -215,6 +215,11 @@ def main() -> None:
             try:
                 html = open(rec["raw_path"], encoding="utf-8", errors="replace").read()
             except OSError:
+                continue
+            if rec.get("blocked") or soft404.is_blocked_fingerprint(html, soft_fp):
+                # We were refused; this is not content and must never be a
+                # document the agent can cite.
+                n_blocked += 1
                 continue
             if rec.get("soft_404") or soft404.is_soft_404(html, soft_fp):
                 n_soft += 1
@@ -228,7 +233,12 @@ def main() -> None:
             kept += 1
 
     print(f"[extract] wrote {kept} documents to {config.CORPUS_FILE} "
-          f"({dropped} dropped as too short, {n_soft} dropped as not-found pages)")
+          f"({dropped} too short, {n_soft} not-found pages, "
+          f"{n_blocked} BLOCK pages)")
+    if n_blocked:
+        print(f"[extract] WARNING: {n_blocked} cached responses are block pages. "
+              f"Those URLs have no content yet - re-fetch them after resolving "
+              f"the block (python blockcheck.py).")
 
 
 if __name__ == "__main__":
