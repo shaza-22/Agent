@@ -195,6 +195,8 @@ def parse_page(html: str, url: str, final_url: str, fetched_at: str) -> Document
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Extract structured documents from raw HTML")
+    ap.add_argument("--keep-duplicates", action="store_true",
+                    help="keep pages whose content is byte-identical to another")
     ap.add_argument("--min-words", type=int, default=20,
                     help="drop near-empty pages (they are usually redirects/shells)")
     args = ap.parse_args()
@@ -204,7 +206,12 @@ def main() -> None:
         raise SystemExit(f"no manifest at {config.CRAWL_MANIFEST}; run crawl.py first")
 
     soft_fp = soft404.load()
-    kept = dropped = n_soft = n_blocked = 0
+    kept = dropped = n_soft = n_blocked = n_dupe = 0
+    # Collapse rows that are the same page under different URL spellings. The
+    # manifest may predate a normalisation change, so this re-canonicalises at
+    # extract time - recovering the deduped corpus without re-fetching anything.
+    seen_urls: set[str] = set()
+    seen_content: dict[str, str] = {}
     with open(config.CORPUS_FILE, "w", encoding="utf-8") as out:
         for line in open(config.CRAWL_MANIFEST, encoding="utf-8"):
             rec = json.loads(line)
@@ -224,17 +231,29 @@ def main() -> None:
             if rec.get("soft_404") or soft404.is_soft_404(html, soft_fp):
                 n_soft += 1
                 continue
-            doc = parse_page(html, rec["url"], rec.get("final_url") or rec["url"],
+            canonical = config.normalise_url(rec["url"])
+            if canonical in seen_urls:
+                n_dupe += 1
+                continue
+            seen_urls.add(canonical)
+
+            doc = parse_page(html, canonical, rec.get("final_url") or canonical,
                              rec.get("fetched_at", ""))
             if doc.word_count < args.min_words:
                 dropped += 1
                 continue
+            # Same body under a different path (session-token variants that
+            # normalisation cannot see) - keep the first, count the rest.
+            if not args.keep_duplicates and doc.content_hash in seen_content:
+                n_dupe += 1
+                continue
+            seen_content[doc.content_hash] = canonical
             out.write(json.dumps(doc.to_record(), ensure_ascii=False) + "\n")
             kept += 1
 
     print(f"[extract] wrote {kept} documents to {config.CORPUS_FILE} "
           f"({dropped} too short, {n_soft} not-found pages, "
-          f"{n_blocked} BLOCK pages)")
+          f"{n_blocked} BLOCK pages, {n_dupe} duplicate URLs/bodies)")
     if n_blocked:
         print(f"[extract] WARNING: {n_blocked} cached responses are block pages. "
               f"Those URLs have no content yet - re-fetch them after resolving "
