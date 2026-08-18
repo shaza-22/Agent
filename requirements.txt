@@ -9,3 +9,10 @@ lxml>=5.0
 
 # Optional: PDF text extraction (tariff/fee schedules are usually PDFs)
 # pypdf>=4.2
+
+# --- Phase 2: retrieval layer ---
+numpy>=1.26
+faiss-cpu>=1.8
+# The embedding model. Weights download from huggingface.co on first use.
+# Retrieval degrades to BM25-only (still useful) if this is unavailable.
+sentence-transformers>=3.0
