@@ -34,7 +34,27 @@ def main() -> None:
     if not manifest:
         raise SystemExit(f"no manifest at {config.CRAWL_MANIFEST}; run crawl.py first")
 
+    # URLs discovered before crawling (sitemaps + navigation + probed paths).
+    seeds_file = config.RAW_DIR / "seeds.json"
+    discovered, real_seeds, probed = set(), set(), set()
+    if seeds_file.exists():
+        seed_data = json.loads(seeds_file.read_text(encoding="utf-8"))
+        for bucket, urls in seed_data.items():
+            normalised = {config.normalise_url(u) for u in urls}
+            discovered.update(normalised)
+            (probed if bucket == "guessed" else real_seeds).update(normalised)
+    discovered.update(r["url"] for r in manifest)
+    # A probed path that 404s is a miss, not a failure: probing costs one
+    # request and finding nothing is the expected outcome most of the time.
+    probe_only = probed - real_seeds
+
     statuses = Counter(r.get("status", 0) for r in manifest)
+    crawled_ok = [r for r in manifest if 200 <= r.get("status", 0) < 300]
+    broken = [r for r in manifest
+              if (r.get("error") or r.get("status", 0) >= 400)
+              and r["url"] not in probe_only]
+    probe_misses = [r for r in manifest
+                    if r.get("status", 0) >= 400 and r["url"] in probe_only]
     errors = [r for r in manifest if r.get("error")]
     unrendered = [r for r in manifest if r.get("looks_unrendered")]
     langs = Counter(d["language"] for d in docs)
@@ -70,14 +90,31 @@ def main() -> None:
     (config.REPORT_DIR / "site_map.json").write_text(
         json.dumps(site_map, indent=2, ensure_ascii=False), encoding="utf-8")
 
+    n_tables = sum(len(d.get("tables", [])) for d in docs)
+    top_sections = ", ".join(
+        f"{k} ({len(v)})" for k, v in
+        sorted(sections.items(), key=lambda kv: -len(kv[1]))[:8]) or "none"
+
     L = []
-    L.append("# Banque Misr - site understanding & crawl coverage\n")
-    L.append(f"- URLs visited: **{len(manifest)}**")
-    L.append(f"- Documents extracted: **{len(docs)}**")
-    L.append(f"- PDFs extracted: **{len(pdfs)}** "
-             f"({sum(1 for p in pdfs if p.get('needs_ocr'))} need OCR)")
-    L.append(f"- Pages with tables (fees/rates live here): **{len(with_tables)}**")
-    L.append(f"- Languages: " + ", ".join(f"{k}={v}" for k, v in langs.most_common()))
+    L.append(f"# {config.BASE_URL} - site understanding & crawl coverage\n")
+    L.append("## Collection summary\n")
+    L.append("| Metric | Count |")
+    L.append("| --- | ---: |")
+    L.append(f"| URLs discovered (sitemap + nav + probes) | {len(discovered)} |")
+    L.append(f"| URLs crawled | {len(manifest)} |")
+    L.append(f"| URLs crawled successfully (2xx) | {len(crawled_ok)} |")
+    L.append(f"| URLs failed (linked page broken or unfetchable) | {len(broken)} |")
+    L.append(f"| Probe misses (guessed path did not exist - expected) | "
+             f"{len(probe_misses)} |")
+    L.append(f"| HTML documents extracted | {len(docs)} |")
+    L.append(f"| PDF documents extracted | {len(pdfs)} "
+             f"({sum(1 for p in pdfs if p.get('needs_ocr'))} unreadable/scanned) |")
+    L.append(f"| Tables extracted | {n_tables} (across {len(with_tables)} pages) |")
+    L.append(f"| Citable sections | {sum(len(d.get('sections', [])) for d in docs)} |")
+    L.append(f"| Languages | "
+             + (", ".join(f"{k}={v}" for k, v in langs.most_common()) or "none") + " |")
+    L.append(f"| Client-rendered pages (need render.py) | {len(unrendered)} |")
+    L.append(f"| Main site sections | {top_sections} |")
     L.append("")
 
     L.append("## HTTP status breakdown\n")
