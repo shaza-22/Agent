@@ -10,18 +10,55 @@ The strategy and the reasoning behind each choice are in
 
 ```bash
 pip install -r requirements.txt
-
-cd data_pipeline
-python discover.py      # robots.txt + sitemaps + nav  -> data/raw/seeds.json
-python crawl.py         # polite BFS crawl             -> data/raw/pages/, manifest.jsonl
-python render.py --all-unrendered   # ONLY if crawl.py warns about client-rendered pages
-python extract.py       # HTML -> structured documents -> data/corpus/documents.jsonl
-python pdf_ingest.py    # tariff/rate PDFs             -> data/corpus/pdf_documents.jsonl
-python audit.py         # coverage + site understanding -> data/reports/site_report.md
+export BM_USER_AGENT="YourProject/1.0 (you@example.com)"   # set a real contact
+./run_pipeline.sh
 ```
 
-Then read `data/reports/site_report.md`. It tells you what you got, what is
-missing, and whether the corpus can actually answer the brief's example tasks.
+That runs discover -> crawl -> extract -> pdf_ingest -> audit -> export ->
+verify, and prints where to look. To run the stages individually:
+
+```bash
+cd data_pipeline
+python discover.py       # robots.txt + sitemaps + nav   -> data/raw/seeds.json
+python crawl.py          # polite BFS crawl              -> data/raw/pages/, manifest.jsonl
+python render.py --all-unrendered   # ONLY if crawl.py warns about client-rendered pages
+python extract.py        # HTML -> structured documents  -> data/corpus/documents.jsonl
+python pdf_ingest.py     # tariff/rate PDFs              -> data/corpus/pdf_documents.jsonl
+python audit.py          # site understanding + coverage -> data/reports/site_report.md
+python export.py         # CSVs + SQLite FTS + card      -> data/export/
+python verify_corpus.py  # the trust gate                -> data/reports/verification.md
+```
+
+### Already have a mirror, or the site is unreachable from your machine?
+
+Mirror it once with `wget` (the exact polite command is in `import_local.py`'s
+docstring), then feed the mirror to the same pipeline:
+
+```bash
+./run_pipeline.sh --from-mirror ./mirror
+```
+
+Only the crawl stage is replaced; extraction, verification and export are
+identical.
+
+## Is the corpus trustworthy?
+
+`verify_corpus.py` is the gate, and it exits non-zero on failure so you can run
+it in CI. It checks that:
+
+- every record carries `url`, `fetched_at`, `content_hash` and `language`
+- **every citation URL actually returned 2xx during the crawl** — no citing a page that 404s
+- no empty/shell documents (the signature of an unrendered JS page)
+- no duplicate content competing in retrieval
+- tables are well formed (they carry the fees and rates)
+- every linked PDF was fetched; scanned ones are flagged `needs_ocr`, never dropped silently
+- the corpus is fresh, and the crawl finished without errors
+- **the brief's example tasks are answerable** — no retrieval strategy recovers a term
+  the corpus never gathered
+
+Nothing in the corpus is generated, inferred or paraphrased. Every field is
+extracted verbatim from a fetched page, and `data/export/CORPUS_CARD.md`
+records where it all came from.
 
 ## Modules
 
@@ -35,7 +72,10 @@ missing, and whether the corpus can actually answer the brief's example tasks.
 | `schema.py` | The `Document` record shape (url, sections, tables, provenance) | — | dataclasses |
 | `extract.py` | HTML → titles, breadcrumbs, heading sections, tables, PDF links | raw store | `data/corpus/documents.jsonl` |
 | `pdf_ingest.py` | Downloads + reads PDFs, flags scanned ones as `needs_ocr` | PDF URLs | `data/corpus/pdf_documents.jsonl` |
-| `audit.py` | Coverage report + site map (deliverable §6) | manifest + corpus | `data/reports/` |
+| `audit.py` | Coverage report + site map (deliverable §6) | manifest + corpus | `data/reports/site_report.md` |
+| `verify_corpus.py` | **Trust gate** — 13 checks, exits non-zero on failure | corpus | `data/reports/verification.md` |
+| `export.py` | CSVs, SQLite FTS5 index, dataset card | corpus | `data/export/` |
+| `import_local.py` | Ingests an existing `wget` mirror instead of crawling | mirror dir | `data/raw/` |
 
 ## Configuration
 
@@ -78,15 +118,37 @@ One JSON object per line in `data/corpus/documents.jsonl`:
 `sections[].anchor` is what lets the agent cite `…/credit-cards#fees` rather
 than a whole page — the Source Attribution requirement in the brief.
 
+## Retrieval, day one
+
+`data/export/corpus.sqlite` ships an FTS5 index over **sections**, so a hit
+returns a precise citation rather than a page dump — no embedding service
+needed to get started:
+
+```sql
+SELECT s.citation, s.heading, snippet(sections_fts, 1, '[', ']', '...', 12)
+FROM sections_fts JOIN sections s ON s.id = sections_fts.rowid
+WHERE sections_fts MATCH 'annual fee' LIMIT 5;
+```
+
+```
+…/personal/cards/credit-cards#fees | Fees and Charges | …[Annual] [Fee] …
+```
+
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v    # 14 tests, no network, no pytest needed
+python -m unittest discover -s tests -v    # 22 tests, no network, no pytest needed
 ```
 
 Covers URL normalisation and scope rules, sitemap/sitemap-index parsing, link
-extraction, boilerplate stripping, table structure, heading anchors and PDF-link
-separation.
+extraction, boilerplate stripping, table structure, heading anchors, PDF-link
+separation, mirror-path→URL reconstruction, and that the verification gate
+genuinely fails on untrustworthy corpora (missing provenance, unresolvable
+citations, shell pages, unanswerable corpora).
+
+The full pipeline is validated end to end by serving a synthetic fixture site
+over `python -m http.server` and running every stage against it — zero requests
+to banquemisr.com.
 
 ## Crawling policy
 

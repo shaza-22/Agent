@@ -109,3 +109,88 @@ class TestExtraction(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestVerificationGate(unittest.TestCase):
+    """The trust gate must actually fail on untrustworthy corpora."""
+
+    @staticmethod
+    def _doc(**over):
+        base = {"url": PAGE_URL, "title": "T", "fetched_at": "2026-08-17T00:00:00Z",
+                "content_hash": "abc123", "language": "en", "word_count": 100,
+                "text": "credit card eligibility fee account document "
+                        "interest rate loan", "sections": [], "tables": [],
+                "pdf_links": [], "links": []}
+        base.update(over)
+        return base
+
+    @staticmethod
+    def _manifest(url=PAGE_URL, status=200):
+        return [{"url": url, "status": status, "outlinks": []}]
+
+    def _status_of(self, checks, name):
+        return next(r["status"] for r in checks.results if r["check"] == name)
+
+    def test_empty_corpus_fails(self):
+        import verify_corpus as v
+        checks = v.run_checks(self._manifest(), [], [], 30)
+        self.assertEqual(checks.worst(), v.FAIL)
+
+    def test_citation_that_never_returned_2xx_fails(self):
+        import verify_corpus as v
+        checks = v.run_checks(self._manifest(status=404), [self._doc()], [], 30)
+        self.assertEqual(
+            self._status_of(checks, "every citation URL fetched successfully"), v.FAIL)
+
+    def test_missing_provenance_fails(self):
+        import verify_corpus as v
+        checks = v.run_checks(self._manifest(), [self._doc(fetched_at="")], [], 30)
+        self.assertEqual(
+            self._status_of(checks, "every record carries provenance"), v.FAIL)
+
+    def test_shell_page_fails(self):
+        import verify_corpus as v
+        checks = v.run_checks(self._manifest(), [self._doc(word_count=3)], [], 30)
+        self.assertEqual(self._status_of(checks, "no empty/shell documents"), v.FAIL)
+
+    def test_corpus_that_cannot_answer_the_brief_fails(self):
+        import verify_corpus as v
+        checks = v.run_checks(self._manifest(), [self._doc(text="hello world")], [], 30)
+        self.assertEqual(
+            self._status_of(checks, "brief's example tasks are answerable"), v.FAIL)
+
+    def test_duplicate_content_warns(self):
+        import verify_corpus as v
+        d1 = self._doc()
+        d2 = self._doc(url=PAGE_URL + "-copy")
+        checks = v.run_checks(
+            self._manifest() + [{"url": d2["url"], "status": 200, "outlinks": []}],
+            [d1, d2], [], 30)
+        self.assertEqual(self._status_of(checks, "no duplicate content"), v.WARN)
+
+    def test_clean_corpus_passes(self):
+        import verify_corpus as v
+        doc = self._doc(
+            sections=[{"heading": "Fees", "level": 2, "anchor": "fees", "text": "fee"}],
+            tables=[{"caption": None, "headers": ["Card", "Annual Fee"],
+                     "rows": [["Gold", "EGP 350"]], "markdown": "| Card |"}])
+        checks = v.run_checks(self._manifest(), [doc], [], 30)
+        self.assertEqual(checks.worst(), v.PASS)
+
+
+class TestMirrorImport(unittest.TestCase):
+    """URL reconstruction from a wget mirror's directory layout."""
+
+    def test_paths_map_back_to_urls(self):
+        import import_local
+        from pathlib import Path
+        root = Path("/m/www.banquemisr.com")
+        base = "https://www.banquemisr.com"
+        cases = {
+            "en/personal/cards.html": "https://www.banquemisr.com/en/personal/cards",
+            "en/index.html": "https://www.banquemisr.com/en",
+            "index.html": "https://www.banquemisr.com/",
+        }
+        for rel, expected in cases.items():
+            self.assertEqual(
+                import_local.path_to_url(root / rel, root, base), expected, rel)

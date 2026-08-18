@@ -138,3 +138,32 @@ Serve `tests/fixtures/` (or a handful of saved pages) over
 That is how this pipeline was validated end to end — robots blocking, sitemap
 discovery, link graph, table extraction and PDF discovery — with zero requests
 to banquemisr.com.
+
+## Stage 6 — Verify, then export
+
+Gathering is not finished when the crawler stops; it is finished when the
+corpus passes `verify_corpus.py`. The checks that matter most:
+
+- **Every citation URL returned 2xx during the crawl.** An agent that cites a
+  page which 404s is worse than one that says "I don't know".
+- **No empty documents.** A zero-word page is the signature of a JS-rendered
+  page that `requests` could not see — silent, and fatal to grounding.
+- **The brief's own example terms appear in the corpus.** If `eligibility`
+  has zero coverage, no retrieval strategy or prompt will recover it.
+
+It exits non-zero, so it belongs in CI, not just in your terminal.
+
+`export.py` then packages the result three ways: CSVs a teammate can eyeball in
+Excel, a SQLite FTS5 index over *sections* that gives the agent working keyword
+retrieval on day one with no embedding service, and `CORPUS_CARD.md` recording
+provenance, counts, collection window and known limitations.
+
+## A note on integrity
+
+Nothing in this corpus is generated, inferred or paraphrased — every field is
+extracted verbatim from a fetched page, and carries the URL and timestamp it
+came from. That is the whole point: the brief's core principle is that the agent
+must say "unavailable" rather than hallucinate, and an agent can only do that if
+the corpus underneath it never invented anything either. If a page could not be
+fetched or a PDF could not be read, the pipeline records the gap (`needs_ocr`,
+fetch errors, `looks_unrendered`) instead of quietly dropping it.

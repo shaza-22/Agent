@@ -26,8 +26,16 @@ from schema import Document
 def pdf_to_text(path: str) -> tuple[str, int]:
     try:
         from pypdf import PdfReader
-    except ImportError:
-        raise SystemExit("pypdf not installed: pip install pypdf")
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:  # ImportError, or a native dep that panics
+        raise SystemExit(
+            f"cannot load pypdf ({exc}).\n"
+            "  Install it with:  pip install pypdf\n"
+            "  If it is installed and still fails, its 'cryptography' native\n"
+            "  dependency is broken in this environment; try:\n"
+            "    pip install --force-reinstall cryptography pypdf"
+        ) from exc
     reader = PdfReader(path)
     pages = []
     for page in reader.pages:
