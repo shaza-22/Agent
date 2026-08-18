@@ -19,8 +19,40 @@ import time
 from bs4 import BeautifulSoup
 
 import config
+import soft404
 from crawl import extract_links, looks_unrendered
 from fetcher import url_key, _now
+
+# Cookie/consent banners that sit on top of the page. Dismissed before capture
+# so the overlay does not suppress or obscure the real content.
+CONSENT_SELECTORS = [
+    "#onetrust-accept-btn-handler",
+    "#onetrust-reject-all-handler",
+    "button#accept-cookies",
+    "button[aria-label*='Accept' i]",
+    "button:has-text('Accept All')",
+    "button:has-text('Accept all')",
+    "button:has-text('Accept')",
+    "button:has-text('I agree')",
+    "button:has-text('Agree')",
+    "a:has-text('Accept Cookies')",
+    ".cookie-consent button",
+    "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+]
+
+
+def dismiss_consent(page) -> str | None:
+    """Click the first consent button that is actually present. Returns which."""
+    for sel in CONSENT_SELECTORS:
+        try:
+            el = page.locator(sel).first
+            if el.count() and el.is_visible():
+                el.click(timeout=2000)
+                page.wait_for_timeout(500)
+                return sel
+        except Exception:                                  # noqa: BLE001
+            continue
+    return None
 
 
 def word_count(html: str) -> int:
@@ -32,7 +64,8 @@ def word_count(html: str) -> int:
 
 
 def render_urls(urls: list[str], wait_ms: int = 2500,
-                wait_until: str = "domcontentloaded") -> dict[str, dict]:
+                wait_until: str = "domcontentloaded",
+                headless: bool = True, accept_consent: bool = True) -> dict[str, dict]:
     """Render each URL and return {url: {html, final_url, words_after}}.
 
     `wait_until` defaults to domcontentloaded, not networkidle. Sites with
@@ -51,10 +84,18 @@ def render_urls(urls: list[str], wait_ms: int = 2500,
     failures: list[tuple[str, str]] = []
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
-        ctx = browser.new_context(user_agent=config.USER_AGENT, locale="en-US",
-                                  viewport={"width": 1440, "height": 900})
+        browser = pw.chromium.launch(headless=headless)
+        # A plain headless context is trivially fingerprintable. These are the
+        # cheap, honest adjustments - a real UA string, a real viewport, real
+        # Accept-Language - not evasion. If the site still blocks, that is a
+        # deliberate signal to respect rather than defeat.
+        ctx = browser.new_context(
+            user_agent=config.USER_AGENT, locale="en-US",
+            viewport={"width": 1440, "height": 900},
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9,ar;q=0.8"},
+        )
         page = ctx.new_page()
+        consent_hits: dict[str, int] = {}
         for i, url in enumerate(urls, 1):
             try:
                 page.goto(url, timeout=int(config.REQUEST_TIMEOUT_SEC * 1000),
@@ -65,21 +106,55 @@ def render_urls(urls: list[str], wait_ms: int = 2500,
                     page.wait_for_load_state("networkidle", timeout=wait_ms)
                 except Exception:                              # noqa: BLE001
                     page.wait_for_timeout(wait_ms)
+                if accept_consent:
+                    hit = dismiss_consent(page)
+                    if hit:
+                        consent_hits[hit] = consent_hits.get(hit, 0) + 1
+                        try:
+                            page.wait_for_load_state("networkidle", timeout=wait_ms)
+                        except Exception:                  # noqa: BLE001
+                            page.wait_for_timeout(500)
                 html = page.content()
                 results[url] = {"html": html,
                                 "final_url": config.normalise_url(page.url),
                                 "words_after": word_count(html)}
-                print(f"[render] {i}/{len(urls)} {results[url]['words_after']:>5}w  {url}")
+                flags = soft404.classify_interstitial(html)
+                note = f"  [{','.join(flags)}]" if flags else ""
+                print(f"[render] {i}/{len(urls)} {results[url]['words_after']:>5}w  "
+                      f"{url}{note}")
             except Exception as exc:                           # noqa: BLE001
                 failures.append((url, str(exc).splitlines()[0][:120]))
                 print(f"[render] {i}/{len(urls)} FAILED {url}: {exc}".splitlines()[0])
             time.sleep(config.REQUEST_DELAY_SEC)
         browser.close()
 
+    if consent_hits:
+        print(f"[render] dismissed consent banners: {consent_hits}")
     if failures:
         print(f"\n[render] {len(failures)} of {len(urls)} pages FAILED to render")
         for url, err in failures[:10]:
             print(f"[render]   {url} - {err}")
+
+    # The check that catches "every page came back identical" immediately,
+    # instead of it surfacing three stages later as a word count that never moves.
+    if len(results) > 1:
+        hashes = {soft404.text_hash(r["html"]) for r in results.values()}
+        if len(hashes) == 1:
+            sample = soft404.visible_text(next(iter(results.values()))["html"])
+            flags = soft404.classify_interstitial(sample)
+            print(f"\n[render] WARNING: all {len(results)} pages rendered to ONE "
+                  f"identical body ({len(sample.split())} words).")
+            if flags:
+                print(f"[render] signature: {', '.join(flags)}")
+            if soft404.looks_like_not_found(sample):
+                print("[render] the shared page says 'not found' - these URLs do "
+                      "not exist on the site (soft 404). Fix the URL list, not "
+                      "the renderer.")
+            print(f"[render] shared text: {sample[:300]}")
+        elif len(hashes) < len(results) / 2:
+            print(f"\n[render] NOTE: {len(results)} pages produced only "
+                  f"{len(hashes)} distinct bodies - check for template pages "
+                  f"with: python diagnose.py --fingerprint")
     return results
 
 
@@ -144,6 +219,11 @@ def main() -> None:
     ap.add_argument("--wait-until", default="domcontentloaded",
                     choices=["load", "domcontentloaded", "networkidle", "commit"])
     ap.add_argument("--wait-ms", type=int, default=2500)
+    ap.add_argument("--headed", action="store_true",
+                    help="run a visible browser (some bot checks treat headless "
+                         "differently; also lets you watch what happens)")
+    ap.add_argument("--no-consent", action="store_true",
+                    help="do not try to dismiss cookie banners")
     args = ap.parse_args()
 
     urls = list(args.url or [])
@@ -172,7 +252,9 @@ def main() -> None:
             except OSError:
                 pass
 
-    results = render_urls(urls, wait_ms=args.wait_ms, wait_until=args.wait_until)
+    results = render_urls(urls, wait_ms=args.wait_ms, wait_until=args.wait_until,
+                          headless=not args.headed,
+                          accept_consent=not args.no_consent)
     rendered, updated = write_back(results)
 
     gained = [(u, before.get(u, 0), r["words_after"]) for u, r in results.items()]

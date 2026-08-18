@@ -77,7 +77,8 @@ records where it all came from.
 | `export.py` | CSVs, SQLite FTS5 index, dataset card | corpus | `data/export/` |
 | `import_local.py` | Ingests an existing `wget` mirror instead of crawling | mirror dir | `data/raw/` |
 | `refetch.py` | Re-fetches specific URLs only, no full re-crawl | URL list/regex | updated `data/raw/` |
-| `diagnose.py` | Compares manifest against bytes on disk; finds stale state | manifest | stdout table |
+| `diagnose.py` | Manifest vs bytes on disk; `--fingerprint` finds template pages | manifest | stdout table |
+| `soft404.py` | Learns the site's not-found template so guessed URLs are excluded | live site | `data/raw/soft404.json` |
 
 ## Configuration
 
@@ -172,6 +173,27 @@ Note that attachments land in `data/corpus/pdf_documents.jsonl`, *not*
 ```bash
 cat data/corpus/*.jsonl | grep -ic "annual fee"
 ```
+
+## Soft 404s (why guessed URLs are dangerous)
+
+Sitecore answers unknown paths with **HTTP 200 and a generic "page not found"
+template**, not a 404. A crawler cannot tell that from real content by status
+code, so guessed paths enter the corpus as dozens of identical documents —
+short enough to be flagged client-rendered, so they also waste every render
+pass, forever, without ever improving.
+
+`discover.py` now requests a deliberately impossible URL first, learns what the
+site answers with, and everything downstream excludes pages matching that
+fingerprint. The tell is always the same: many unrelated URLs, byte-identical
+bodies.
+
+```bash
+python diagnose.py --fingerprint    # groups every page by body text
+```
+
+`CANDIDATE_PATHS` in `discover.py` is a **guess and must be corrected per site**.
+Prune it to the paths that actually resolve; the audit report names the ones
+that don't.
 
 ## Debugging a stage that appears to have done nothing
 

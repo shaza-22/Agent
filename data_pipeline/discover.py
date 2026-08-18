@@ -18,6 +18,7 @@ import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 
 import config
+import soft404
 from fetcher import Fetcher
 
 # Paths worth probing even if no sitemap exists. Adjust after you see the
@@ -106,6 +107,15 @@ def _absolutise(base: str, href: str) -> str:
 def main() -> None:
     config.ensure_dirs()
     f = Fetcher()
+    # Learn how the site answers a URL that cannot exist. Without this, guessed
+    # paths that return "200 + page not found" enter the corpus as real pages.
+    fp = soft404.learn(f)
+    if fp["detected"]:
+        print(f"[discover] site serves SOFT 404s (HTTP 200, {fp['word_counts']} "
+              f"words). Pages matching that fingerprint will be excluded.")
+    else:
+        print("[discover] site returns real 404s for unknown paths")
+
     seeds = {
         "sitemap": collect_sitemap_urls(f),
         "nav": collect_nav_urls(f),

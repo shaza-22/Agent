@@ -23,6 +23,7 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 
 import config
+import soft404
 from fetcher import url_key
 
 
@@ -87,12 +88,74 @@ def inspect(rec: dict) -> dict:
     return out
 
 
+def fingerprint(manifest: list[dict], limit: int = 0) -> None:
+    """Group pages by their visible text and show what the big clusters are.
+
+    Many unrelated URLs sharing one byte-identical body is the signature of a
+    template being served in place of content - a soft 404, a challenge page,
+    or a consent wall. This prints the shared text so you can see which.
+    """
+    from collections import defaultdict
+    groups: dict[str, list[str]] = defaultdict(list)
+    samples: dict[str, str] = {}
+    sizes: dict[str, int] = {}
+
+    rows = [r for r in manifest if r.get("raw_path")]
+    if limit:
+        rows = rows[:limit]
+
+    for rec in rows:
+        try:
+            html = Path(rec["raw_path"]).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        h = soft404.text_hash(html)
+        groups[h].append(rec["url"])
+        if h not in samples:
+            samples[h] = soft404.visible_text(html)
+            sizes[h] = len(html.encode("utf-8"))
+
+    ranked = sorted(groups.items(), key=lambda kv: -len(kv[1]))
+    print(f"Grouped {sum(len(v) for v in groups.values())} pages into "
+          f"{len(groups)} distinct bodies.\n")
+
+    for h, urls in ranked[:5]:
+        if len(urls) == 1:
+            continue
+        text = samples[h]
+        print("=" * 78)
+        print(f"{len(urls)} URLs share ONE identical body "
+              f"({len(text.split())} words, {sizes[h]} bytes, hash {h})")
+        flags = soft404.classify_interstitial(text)
+        if flags:
+            print(f"  INTERSTITIAL DETECTED: {', '.join(flags)}")
+        if soft404.looks_like_not_found(text):
+            print("  NOT-FOUND WORDING DETECTED -> these URLs do not exist "
+                  "(soft 404: HTTP 200 with a 'page not found' template)")
+        if not flags and not soft404.looks_like_not_found(text):
+            print("  No known signature. Read the text below and judge:")
+        print("\n  --- visible text of the shared page ---")
+        print("  " + (text[:800] or "(no visible text at all)"))
+        print("\n  --- example URLs ---")
+        for u in urls[:8]:
+            print(f"    {u}")
+        if len(urls) > 8:
+            print(f"    ... and {len(urls) - 8} more")
+        print()
+
+    unique = sum(1 for _, v in groups.items() if len(v) == 1)
+    print(f"{unique} pages have a body unique to themselves (these look real).")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Inspect raw store vs manifest")
     ap.add_argument("--url", nargs="*", default=[])
     ap.add_argument("--all-unrendered", action="store_true")
     ap.add_argument("--sample", type=int, default=0)
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--fingerprint", action="store_true",
+                    help="group all pages by body text to find templates served "
+                         "in place of content (soft 404s, challenge/consent walls)")
     args = ap.parse_args()
 
     if not config.CRAWL_MANIFEST.exists():
@@ -100,6 +163,10 @@ def main() -> None:
     manifest = [json.loads(l) for l in
                 config.CRAWL_MANIFEST.read_text(encoding="utf-8").splitlines()
                 if l.strip()]
+
+    if args.fingerprint:
+        fingerprint(manifest)
+        return
 
     wanted = {config.normalise_url(u) for u in args.url}
     rows = [r for r in manifest if r["url"] in wanted] if wanted else []

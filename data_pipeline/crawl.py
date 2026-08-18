@@ -19,6 +19,7 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
 import config
+import soft404
 from fetcher import Fetcher
 
 
@@ -78,8 +79,10 @@ def main() -> None:
     frontier: deque[tuple[str, int, str | None]] = deque(
         (config.normalise_url(u), 0, None) for u in seeds
     )
+    soft_fp = soft404.load()
     visited: set[str] = set()
     attachment_urls: set[str] = set()
+    n_soft404 = 0
     unrendered = 0
 
     with open(config.CRAWL_MANIFEST, "w", encoding="utf-8") as manifest:
@@ -96,12 +99,20 @@ def main() -> None:
             res = f.fetch(url)
             links: list[str] = []
             flag_unrendered = False
+            is_soft = False
             if res.ok() and res.raw_path and "html" in res.content_type.lower():
                 html = open(res.raw_path, encoding="utf-8", errors="replace").read()
-                links = extract_links(html, res.final_url)
-                flag_unrendered = looks_unrendered(html)
-                if flag_unrendered:
-                    unrendered += 1
+                is_soft = soft404.is_soft_404(html, soft_fp)
+                if is_soft:
+                    # A not-found template. Do not follow its links and do not
+                    # count it as a page needing rendering.
+                    n_soft404 += 1
+                    links = []
+                else:
+                    links = extract_links(html, res.final_url)
+                    flag_unrendered = looks_unrendered(html)
+                    if flag_unrendered:
+                        unrendered += 1
                 for link in links:
                     if link not in visited:
                         if config.is_attachment_url(link):
@@ -123,6 +134,7 @@ def main() -> None:
                 "from_cache": res.from_cache,
                 "outlinks": links,
                 "looks_unrendered": flag_unrendered,
+                "soft_404": is_soft,
             }, ensure_ascii=False) + "\n")
             manifest.flush()
 
@@ -134,6 +146,9 @@ def main() -> None:
     )
     print(f"[crawl] done: {len(visited)} URLs, "
           f"{len(attachment_urls)} attachments queued")
+    if n_soft404:
+        print(f"[crawl] {n_soft404} URLs returned the site's not-found template "
+              f"(HTTP 200 soft 404) and were excluded")
     if unrendered:
         print(f"[crawl] WARNING: {unrendered} pages looked client-rendered. "
               f"Re-fetch those with render.py before extracting.")

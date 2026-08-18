@@ -20,6 +20,7 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup, NavigableString
 
 import config
+import soft404
 from schema import Document, Section, Table
 
 # Page furniture that is repeated on every page. Keeping it would make every
@@ -202,7 +203,8 @@ def main() -> None:
     if not config.CRAWL_MANIFEST.exists():
         raise SystemExit(f"no manifest at {config.CRAWL_MANIFEST}; run crawl.py first")
 
-    kept = dropped = 0
+    soft_fp = soft404.load()
+    kept = dropped = n_soft = 0
     with open(config.CORPUS_FILE, "w", encoding="utf-8") as out:
         for line in open(config.CRAWL_MANIFEST, encoding="utf-8"):
             rec = json.loads(line)
@@ -214,6 +216,9 @@ def main() -> None:
                 html = open(rec["raw_path"], encoding="utf-8", errors="replace").read()
             except OSError:
                 continue
+            if rec.get("soft_404") or soft404.is_soft_404(html, soft_fp):
+                n_soft += 1
+                continue
             doc = parse_page(html, rec["url"], rec.get("final_url") or rec["url"],
                              rec.get("fetched_at", ""))
             if doc.word_count < args.min_words:
@@ -223,7 +228,7 @@ def main() -> None:
             kept += 1
 
     print(f"[extract] wrote {kept} documents to {config.CORPUS_FILE} "
-          f"({dropped} dropped as too short)")
+          f"({dropped} dropped as too short, {n_soft} dropped as not-found pages)")
 
 
 if __name__ == "__main__":

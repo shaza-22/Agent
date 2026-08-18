@@ -57,6 +57,7 @@ def main() -> None:
                     if r.get("status", 0) >= 400 and r["url"] in probe_only]
     errors = [r for r in manifest if r.get("error")]
     unrendered = [r for r in manifest if r.get("looks_unrendered")]
+    soft_404s = [r for r in manifest if r.get("soft_404")]
     langs = Counter(d["language"] for d in docs)
 
     # Top-level sections, from the first URL path segment after the language.
@@ -114,6 +115,8 @@ def main() -> None:
     L.append(f"| Languages | "
              + (", ".join(f"{k}={v}" for k, v in langs.most_common()) or "none") + " |")
     L.append(f"| Client-rendered pages (need render.py) | {len(unrendered)} |")
+    L.append(f"| Soft 404s (HTTP 200 not-found template, excluded) | "
+             f"{len(soft_404s)} |")
     L.append(f"| Main site sections | {top_sections} |")
     L.append("")
 
@@ -140,6 +143,11 @@ def main() -> None:
     L.append("")
 
     L.append("## Gaps and risks\n")
+    if soft_404s:
+        L.append(f"- **{len(soft_404s)} URLs returned the site's not-found template** "
+                 f"with HTTP 200. These are guessed/stale URLs that do not exist; "
+                 f"they are excluded from the corpus. Prune them from "
+                 f"`discover.CANDIDATE_PATHS` so they stop being fetched.")
     if unrendered:
         L.append(f"- **{len(unrendered)} pages looked client-rendered** - re-fetch with "
                  f"`python render.py --all-unrendered`, else their content is missing.")

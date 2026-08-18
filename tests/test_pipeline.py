@@ -269,3 +269,51 @@ class TestRenderManifestWriteBack(unittest.TestCase):
                 self.assertIn("https://www.banquemisr.com/docs/t.pdf", rec["outlinks"])
             finally:
                 config.RAW_DIR, config.CRAWL_MANIFEST = orig_raw, orig_manifest
+
+
+class TestSoft404Detection(unittest.TestCase):
+    """Many unrelated URLs sharing one body = a template, not content."""
+
+    NOT_FOUND = ("<html><body><h1>Page Not Found</h1><p>The page you requested "
+                 "could not be found. Please use the navigation menu.</p></body></html>")
+    REAL = ("<html><body><main><h1>Credit Cards</h1><p>Our cards include Gold "
+            "and Platinum tiers with different annual fees.</p></main></body></html>")
+
+    def test_identical_text_hashes_match_regardless_of_markup(self):
+        import soft404
+        a = "<html><body><p>Hello   world</p></body></html>"
+        b = "<html><body><div><p>Hello world</p><script>x=1</script></div></body></html>"
+        self.assertEqual(soft404.text_hash(a), soft404.text_hash(b))
+
+    def test_distinct_pages_hash_differently(self):
+        import soft404
+        self.assertNotEqual(soft404.text_hash(self.REAL),
+                            soft404.text_hash(self.NOT_FOUND))
+
+    def test_not_found_wording_is_recognised(self):
+        import soft404
+        self.assertTrue(soft404.looks_like_not_found(self.NOT_FOUND))
+        self.assertFalse(soft404.looks_like_not_found(self.REAL))
+
+    def test_soft_404_matched_against_learned_fingerprint(self):
+        import soft404
+        fp = {"detected": True, "hashes": [soft404.text_hash(self.NOT_FOUND)],
+              "word_counts": [20]}
+        self.assertTrue(soft404.is_soft_404(self.NOT_FOUND, fp))
+        self.assertFalse(soft404.is_soft_404(self.REAL, fp))
+
+    def test_falls_back_to_wording_when_no_fingerprint_learned(self):
+        import soft404
+        fp = {"detected": False, "hashes": []}
+        self.assertTrue(soft404.is_soft_404(self.NOT_FOUND, fp))
+        self.assertFalse(soft404.is_soft_404(self.REAL, fp))
+
+    def test_interstitials_are_named(self):
+        import soft404
+        cf = "<html><body>Checking your browser before accessing. Ray ID</body></html>"
+        self.assertIn("cloudflare", soft404.classify_interstitial(cf))
+        consent = "<html><body><div id='onetrust-banner'>We use cookies</div></body></html>"
+        self.assertIn("cookie_consent", soft404.classify_interstitial(consent))
+        js = "<html><body>Please enable JavaScript to continue</body></html>"
+        self.assertIn("js_required", soft404.classify_interstitial(js))
+        self.assertEqual(soft404.classify_interstitial(self.REAL), [])
