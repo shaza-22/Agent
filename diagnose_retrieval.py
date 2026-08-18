@@ -11,9 +11,9 @@ from __future__ import annotations
 import argparse
 
 from retrieval import Retriever
-from retrieval.diagnostics import (compare_modes, duplicate_report, explain_query,
-                                   health_check, index_overview, show_records,
-                                   topic_report)
+from retrieval.diagnostics import (check_staleness, compare_modes, duplicate_report,
+                                   explain_query, health_check, index_overview,
+                                   show_record, show_records, topic_report)
 
 TEST_QUERIES = [
     "What are the eligibility requirements for a Banque Misr credit card?",
@@ -49,6 +49,10 @@ def main() -> None:
     ap.add_argument("--depth", type=int, default=20)
     ap.add_argument("--show", metavar="REGEX",
                     help="print the full text of records matching a pattern")
+    ap.add_argument("--staleness", action="store_true",
+                    help="is the stored metadata what the current code produces?")
+    ap.add_argument("--record", metavar="URL_SUBSTRING",
+                    help="stored vs live classification for one record")
     ap.add_argument("--health", action="store_true",
                     help="flag metadata distributions that indicate a bug")
     ap.add_argument("--duplicates", action="store_true",
@@ -61,6 +65,11 @@ def main() -> None:
     r = Retriever(args.index_dir)
     if args.show:
         show_records(r, args.show, limit=args.top_k or 10)
+        return
+    if args.staleness:
+        raise SystemExit(1 if check_staleness(r) else 0)
+    if args.record:
+        show_record(r, args.record)
         return
     if args.health:
         raise SystemExit(1 if health_check(r) else 0)

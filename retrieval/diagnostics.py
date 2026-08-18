@@ -261,3 +261,71 @@ def health_check(retriever) -> int:
 
     print(f"\n  {warn} warning(s)")
     return warn
+
+
+def check_staleness(retriever) -> int:
+    """Recompute classification for every record and count disagreements.
+
+    The definitive answer to "did my rebuild actually take effect?". The
+    embedding cache stores vectors only, so it cannot freeze metadata - but a
+    stale records.jsonl (index never rebuilt, or built from another directory)
+    can, and looks identical from the outside.
+    """
+    from .intent import classify_page, classify_segment, classifier_fingerprint
+
+    manifest_fp = retriever.index.manifest.get("classifier_fingerprint")
+    current_fp = classifier_fingerprint()
+    print("=" * 100)
+    print("STALENESS CHECK")
+    print("=" * 100)
+    print(f"  index dir            {retriever.index.dir}")
+    print(f"  manifest classifier  {manifest_fp}")
+    print(f"  current classifier   {current_fp}")
+    print(f"  match                {'YES' if manifest_fp == current_fp else 'NO'}")
+
+    seg_diff = page_diff = 0
+    examples = []
+    for rec in retriever.records:
+        url, title = rec.get("source_url", ""), rec.get("title", "")
+        live_seg = classify_segment(url, title)
+        live_page = classify_page(url, title)
+        if live_seg != rec.get("segment"):
+            seg_diff += 1
+            if len(examples) < 8:
+                examples.append((url, rec.get("segment"), live_seg))
+        if live_page != rec.get("page_type"):
+            page_diff += 1
+
+    print(f"\n  records whose stored segment  != live value: {seg_diff}")
+    print(f"  records whose stored page_type != live value: {page_diff}")
+    for url, stored, live in examples:
+        print(f"    {stored:<10} -> {live:<10} {url[:70]}")
+    if seg_diff or page_diff:
+        print("\n  >>> INDEX IS STALE. Run: python -m retrieval.build")
+    else:
+        print("\n  Index metadata matches the current classifier.")
+    return seg_diff + page_diff
+
+
+def show_record(retriever, url_substring: str, limit: int = 5) -> None:
+    """Print one record's stored metadata beside a live re-classification."""
+    from .intent import classify_page, classify_segment
+    found = [r for r in retriever.records
+             if url_substring.lower() in (r.get("source_url", "") or "").lower()]
+    if not found:
+        print(f"no record whose URL contains {url_substring!r}")
+        return
+    for rec in found[:limit]:
+        url, title = rec.get("source_url", ""), rec.get("title", "")
+        print("=" * 100)
+        print(f"  url      {url}")
+        print(f"  title    {title}")
+        print(f"  heading  {rec.get('section_heading')}")
+        print(f"  {'field':<12} {'STORED IN INDEX':<20} {'LIVE (current code)':<20}")
+        print(f"  {'-'*12} {'-'*20} {'-'*20}")
+        for field, live in (("segment", classify_segment(url, title)),
+                            ("page_type", classify_page(url, title))):
+            stored = rec.get(field)
+            flag = "" if stored == live else "   <-- DIFFERS (index is stale)"
+            print(f"  {field:<12} {str(stored):<20} {str(live):<20}{flag}")
+        print(f"  {'language':<12} {str(rec.get('language')):<20}")

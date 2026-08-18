@@ -15,7 +15,7 @@ No LLM, no API. Rules only - this is Phase 2.
 from __future__ import annotations
 
 import re
-from urllib.parse import urlparse
+from urllib.parse import unquote_plus, urlparse
 
 # --- page type, from URL and title -----------------------------------------
 # News/press/about pages dominate lexical search for product queries because
@@ -32,11 +32,26 @@ _PRODUCT_PAT = re.compile(
     r"rates?|personal|retail|individual)", re.I)
 
 # --- customer segment -------------------------------------------------------
+# NOTE: "sme"/"smes" is deliberately absent. On this site /smes/ is the
+# top-level container for the whole product catalogue including retail, so
+# treating it as a corporate signal - in a path OR a title - mislabels the
+# personal products nested under it.
 _CORPORATE_PAT = re.compile(
-    r"(corporate|business|sme|enterprise|company|companies|commercial|"
+    r"(corporate|business|enterprise|company|companies|commercial|"
     r"institution|wholesale|trade-?finance|payroll)", re.I)
 _CONSUMER_PAT = re.compile(
     r"(personal|individual|retail|consumer|private|youth|student)", re.I)
+
+# Per-path-segment markers. Matched against ONE decoded path segment at a time,
+# deepest first, so an ancestor menu segment cannot override the page itself.
+_SEGMENT_CONSUMER = re.compile(
+    r"^(retail[\s_-]*banking|personal[\s_-]*banking|individual|consumer|"
+    r"retail|personal)$|retail[\s_-]*banking", re.I)
+_SEGMENT_CORPORATE = re.compile(
+    r"corporate[\s_-]*banking|^corporate$|companies[\s_-]*cards?|"
+    r"^companies$|business[\s_-]*banking|^corporates?$", re.I)
+# Segments that look audience-specific elsewhere but are pure containers here.
+_SEGMENT_IGNORE = re.compile(r"(smes?|home|pages|en|ar|index)", re.I)
 
 PAGE_TYPES = ("product", "news", "about", "other")
 SEGMENTS = ("consumer", "corporate", "unknown")
@@ -59,25 +74,41 @@ def classify_page(url: str, title: str = "", breadcrumbs: str = "") -> str:
 
 
 def classify_segment(url: str, title: str = "", text: str = "") -> str:
-    """consumer | corporate | unknown, decided from the URL PATH only.
+    """consumer | corporate | unknown, from the URL path, deepest segment first.
 
-    An earlier version also scanned page body text and returned `corporate`
-    when corporate-ish words appeared twice. On the real corpus that labelled
-    637 of 1264 units corporate against only 88 consumer - a retail card page
-    saying "business hours" or "our company" was enough to flip it. Because the
-    ranker penalises corporate results on personal questions, that demoted half
-    the corpus and let unclassified generic pages float to the top.
+    Two lessons from the real corpus are encoded here.
 
-    The URL path is the only signal the site actually controls per-page
-    (/corporate/..., /personal/...), so it is the only one trusted here.
-    Everything else stays `unknown`, which carries no penalty - a wrong label
-    is worse than no label.
+    1. Body text is not evidence. An earlier version scanned page text and
+       returned `corporate` when corporate-ish words appeared twice, labelling
+       637 of 1264 units corporate against 88 consumer. A retail page saying
+       "business hours" was enough.
+
+    2. This site's information architecture does not separate audiences at the
+       top level. Personal products are nested UNDER an `/smes/` segment - the
+       consumer BM YOUTH CARD lives at
+       `/home/smes/retail banking/pages/cards/credit cards list/...`. So
+       `/smes/` carries no audience signal here and is deliberately ignored;
+       treating it as corporate mislabels a large part of the retail catalogue.
+
+    Path segments are therefore scanned from the DEEPEST inwards, and the
+    first audience marker found wins - the segment nearest the page describes
+    the page, while ancestors describe the menu that happens to contain it.
+    Anything unmatched stays `unknown`, which carries no ranking penalty.
     """
     path = urlparse(url).path if "://" in url else url
-    if _CORPORATE_PAT.search(path):
-        return "corporate"
-    if _CONSUMER_PAT.search(path):
-        return "consumer"
+    # Sitecore paths are percent-encoded ("retail%20banking"), and the corpus
+    # stores them that way, so decode before matching or nothing ever matches.
+    path = unquote_plus(path).lower()
+    segments = [seg.strip() for seg in path.split("/") if seg.strip()]
+
+    for seg in reversed(segments):
+        if _SEGMENT_IGNORE.fullmatch(seg):
+            continue          # container segment, no audience meaning here
+        if _SEGMENT_CONSUMER.search(seg):
+            return "consumer"
+        if _SEGMENT_CORPORATE.search(seg):
+            return "corporate"
+
     # A title is weaker than a path but still page-specific; require it to be
     # unambiguous (exactly one side present).
     corp_t = bool(_CORPORATE_PAT.search(title or ""))
@@ -183,3 +214,15 @@ def heading_matches_intent(heading: str, intents: list[str]) -> bool:
 
 def looks_like_product_page(url: str, title: str) -> bool:
     return classify_page(url, title) == "product"
+
+
+def classifier_fingerprint() -> str:
+    """Hash of this module's source.
+
+    Stamped into the index manifest at build time so a records.jsonl built by
+    different classification logic is detectable rather than silently trusted.
+    """
+    import hashlib
+    from pathlib import Path
+    return hashlib.sha1(
+        Path(__file__).read_bytes()).hexdigest()[:12]

@@ -24,8 +24,8 @@ import numpy as np
 from .bm25 import BM25, tokenize
 from .embedders import Embedder, build_embedder
 from .index import VectorIndex
-from .intent import (extract_intents, extract_topics, heading_matches_intent,
-                     query_segment)
+from .intent import (classifier_fingerprint, extract_intents, extract_topics,
+                     heading_matches_intent, query_segment)
 
 DEFAULT_INDEX_DIR = Path("data/retrieval")
 RRF_K = 60          # standard RRF damping constant
@@ -59,6 +59,14 @@ class Retriever:
                  embedder: Embedder | None = None, enable_bm25: bool = True):
         self.index = VectorIndex.load(Path(index_dir))
         self.records = self.index.records
+        built_with = self.index.manifest.get("classifier_fingerprint")
+        self.stale_classifier = bool(built_with and
+                                     built_with != classifier_fingerprint())
+        if self.stale_classifier:
+            print(f"[retrieval] WARNING: this index was built with different "
+                  f"classification logic (manifest={built_with}, "
+                  f"current={classifier_fingerprint()}). page_type/segment "
+                  f"values are stale - re-run: python -m retrieval.build")
         self._embedder = embedder
         self._bm25 = None
         if enable_bm25 and self.records:

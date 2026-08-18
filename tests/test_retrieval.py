@@ -564,3 +564,132 @@ class TestSegmentPenaltyOnlyAppliesToLabelledRecords(RetrievalEvalFixture):
         for h in hits:
             if h["segment"] == "unknown":
                 self.assertNotIn("segment_mismatch", h["boosts"])
+
+
+class TestBanqueMisrUrlTaxonomy(unittest.TestCase):
+    """Real URLs from the corpus. This site nests PERSONAL products under an
+    /smes/ path segment, so /smes/ carries no audience meaning here and the
+    deepest matching segment decides. Paths are percent-encoded in the corpus.
+    """
+
+    BASE = "https://www.banquemisr.com"
+
+    def _seg(self, path, title=""):
+        from retrieval.intent import classify_segment
+        return classify_segment(self.BASE + path, title)
+
+    def test_retail_banking_under_smes_is_consumer(self):
+        self.assertEqual(self._seg(
+            "/home/smes/retail%20banking/pages/cards/credit%20cards%20list/"
+            "bm-youth-card", "BM YOUTH CARD"), "consumer")
+
+    def test_corporate_banking_under_smes_is_corporate(self):
+        self.assertEqual(self._seg(
+            "/home/smes/corporate%20banking/companies%20cards",
+            "Companies Cards"), "corporate")
+
+    def test_rewards_club_under_retail_banking_is_consumer(self):
+        self.assertEqual(self._seg(
+            "/home/smes/retail%20banking/pages/bm%20rewards%20club/overview",
+            "BM Rewards Club"), "consumer")
+
+    def test_hyphenated_variants_behave_identically(self):
+        self.assertEqual(self._seg("/home/smes/retail-banking/pages/cards/gold"),
+                         "consumer")
+        self.assertEqual(self._seg("/home/smes/corporate-banking/pages/loans"),
+                         "corporate")
+
+    def test_smes_alone_is_not_an_audience_signal(self):
+        # The regression that mislabelled a large part of the retail catalogue.
+        self.assertEqual(self._seg("/home/smes/pages/overview", "SMEs Overview"),
+                         "unknown")
+
+    def test_deepest_segment_wins_over_an_ancestor(self):
+        # An ancestor describes the menu; the nearest segment describes the page.
+        self.assertEqual(self._seg(
+            "/home/smes/corporate%20banking/pages/retail%20banking/cards"),
+            "consumer")
+
+    def test_percent_encoding_is_decoded_before_matching(self):
+        encoded = self._seg("/home/smes/retail%20banking/pages/cards")
+        plain = self._seg("/home/smes/retail banking/pages/cards")
+        self.assertEqual(encoded, plain)
+        self.assertEqual(encoded, "consumer")
+
+
+class TestIndexStalenessDetection(unittest.TestCase):
+    """The embedding cache stores vectors only, so it cannot freeze metadata -
+    but a records.jsonl that was never rebuilt can, and looks identical from
+    the outside. That must be detectable."""
+
+    def _build(self, tmp: Path):
+        corpus = tmp / "corpus"
+        corpus.mkdir(parents=True, exist_ok=True)
+        url = ("https://www.banquemisr.com/home/smes/retail%20banking/pages/"
+               "cards/bm-youth-card")
+        (corpus / "documents.jsonl").write_text(json.dumps({
+            "url": url, "source_url": url, "final_url": url,
+            "title": "BM YOUTH CARD", "language": "en",
+            "fetched_at": "2026-08-18T00:00:00Z", "content_hash": "x",
+            "breadcrumbs": [], "section_path": [], "text": "youth card",
+            "sections": [{"heading": "Eligibility", "level": 2, "anchor": "e",
+                          "text": "Applicants must be aged between sixteen and "
+                                  "twenty five and hold a national identity card."}],
+            "tables": [], "links": [], "pdf_links": [], "doc_type": "page",
+            "word_count": 20}, ensure_ascii=False) + "\n", encoding="utf-8")
+        (corpus / "pdf_documents.jsonl").write_text("", encoding="utf-8")
+        index_dir = tmp / "index"
+        idx = VectorIndex(index_dir)
+        idx.build(load_all(corpus), build_embedder("hashing"),
+                  cache_dir=tmp / "cache")
+        idx.save()
+        return corpus, index_dir
+
+    def test_rebuild_regenerates_metadata_even_with_full_cache_reuse(self):
+        import retrieval.records as R
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus, index_dir = self._build(Path(tmp))
+            first = Retriever(index_dir).records[0]["segment"]
+            self.assertEqual(first, "consumer")
+
+            original = R.classify_segment
+            try:
+                R.classify_segment = lambda url, title="", text="": "corporate"
+                idx = VectorIndex(index_dir)
+                stats = idx.build(load_all(corpus), build_embedder("hashing"),
+                                  cache_dir=Path(tmp) / "cache")
+                idx.save()
+                # Every embedding came from cache, yet metadata still changed.
+                self.assertEqual(stats.embedded_now, 0)
+                self.assertGreater(stats.reused_from_cache, 0)
+                self.assertEqual(Retriever(index_dir).records[0]["segment"],
+                                 "corporate")
+            finally:
+                R.classify_segment = original
+
+    def test_manifest_records_the_classifier_fingerprint(self):
+        from retrieval.intent import classifier_fingerprint
+        with tempfile.TemporaryDirectory() as tmp:
+            _, index_dir = self._build(Path(tmp))
+            r = Retriever(index_dir)
+            self.assertEqual(r.index.manifest["classifier_fingerprint"],
+                             classifier_fingerprint())
+            self.assertFalse(r.stale_classifier)
+
+    def test_tampered_metadata_is_reported_as_stale(self):
+        from retrieval.diagnostics import check_staleness
+        with tempfile.TemporaryDirectory() as tmp:
+            _, index_dir = self._build(Path(tmp))
+            path = index_dir / VectorIndex.RECORDS_FILE
+            recs = [json.loads(l) for l in
+                    path.read_text(encoding="utf-8").splitlines() if l.strip()]
+            recs[0]["segment"] = "corporate"          # as if built by old logic
+            path.write_text("\n".join(json.dumps(r, ensure_ascii=False)
+                                      for r in recs) + "\n", encoding="utf-8")
+            self.assertGreater(check_staleness(Retriever(index_dir)), 0)
+
+    def test_a_freshly_built_index_is_not_stale(self):
+        from retrieval.diagnostics import check_staleness
+        with tempfile.TemporaryDirectory() as tmp:
+            _, index_dir = self._build(Path(tmp))
+            self.assertEqual(check_staleness(Retriever(index_dir)), 0)

@@ -118,6 +118,17 @@ cosine scales differ per model, so calibrate it on your own corpus.
 
 Two classifier bugs found from the real index's distribution, not from tuning:
 
+**This site's IA nests personal products under `/smes/`.** The consumer
+BM YOUTH CARD lives at
+`/home/smes/retail%20banking/pages/cards/credit%20cards%20list/...`, so
+treating `/smes/` as a corporate signal mislabels much of the retail catalogue.
+`/smes/` is therefore ignored entirely (in paths *and* titles), and path
+segments are scanned **deepest-first** — the segment nearest the page describes
+the page, while ancestors describe the menu that happens to contain it.
+`retail banking` → consumer, `corporate banking` / `companies cards` →
+corporate. Paths are percent-decoded before matching, since the corpus stores
+them encoded.
+
 **Segment over-triggered.** 637 of 1264 units were labelled `corporate` against
 only 88 `consumer`, because `classify_segment` scanned page *body text* and
 returned corporate when corporate-ish words appeared twice — "business hours",
@@ -132,6 +143,26 @@ penalty** — a wrong label is worse than no label.
 the 256 PDF units: `pdf_documents.jsonl` predates the language fix and was never
 regenerated. Language is now derived from the chunk text at index time, so the
 frozen corpus does not need re-ingesting.
+
+## Is my index stale?
+
+Metadata (`page_type`, `segment`, `language`) is regenerated on **every**
+`python -m retrieval.build`. The embedding cache stores vectors only — keyed by
+text hash — so it cannot freeze metadata: a rebuild with 100% cache reuse
+(`embedded_now: 0`) still rewrites every classification. This is covered by a
+test that changes the classifier, rebuilds from cache, and asserts the stored
+value changed.
+
+What *can* go stale is a `records.jsonl` that was never rebuilt, or an index
+read from a different directory than the one built. That is now detectable:
+
+```bash
+python diagnose_retrieval.py --staleness             # stored vs live, whole index
+python diagnose_retrieval.py --record bm-youth-card  # one record, side by side
+```
+
+The manifest stores a `classifier_fingerprint`, and `Retriever` prints a warning
+on load if the index was built with different classification logic.
 
 ## Diagnostics
 

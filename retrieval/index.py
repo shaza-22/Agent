@@ -23,6 +23,7 @@ import numpy as np
 
 from .cache import EmbeddingCache
 from .embedders import Embedder
+from .intent import classifier_fingerprint
 from .records import RetrievalRecord
 
 
@@ -98,6 +99,10 @@ class VectorIndex:
             "embedder": embedder.config.to_dict(),
             "embedder_fingerprint": embedder.config.fingerprint(),
             "index_type": "faiss.IndexFlatIP (cosine over L2-normalised vectors)",
+            # Metadata (page_type/segment/language) is regenerated on every
+            # build; this records WHICH logic produced it, so a stale
+            # records.jsonl is detectable instead of silently trusted.
+            "classifier_fingerprint": classifier_fingerprint(),
             "metric": "cosine",
             "build": stats.to_dict(),
             "cache": cache.stats() if cache else None,
