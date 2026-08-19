@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from urllib.parse import unquote_plus
 
 from .bm25 import tokenize
 from .intent import extract_intents
@@ -271,7 +272,7 @@ def check_staleness(retriever) -> int:
     stale records.jsonl (index never rebuilt, or built from another directory)
     can, and looks identical from the outside.
     """
-    from .intent import classify_page, classify_segment, classifier_fingerprint
+    from .intent import classifier_fingerprint, derive_page_type, derive_segment
 
     manifest_fp = retriever.index.manifest.get("classifier_fingerprint")
     current_fp = classifier_fingerprint()
@@ -287,8 +288,11 @@ def check_staleness(retriever) -> int:
     examples = []
     for rec in retriever.records:
         url, title = rec.get("source_url", ""), rec.get("title", "")
-        live_seg = classify_segment(url, title)
-        live_page = classify_page(url, title)
+        # Must pass document_type, or every PDF looks stale: attachments are
+        # classified as product data rather than by URL pattern.
+        doc_type = rec.get("document_type", "html")
+        live_seg = derive_segment(url, title, doc_type)
+        live_page = derive_page_type(url, title, doc_type)
         if live_seg != rec.get("segment"):
             seg_diff += 1
             if len(examples) < 8:
@@ -307,25 +311,72 @@ def check_staleness(retriever) -> int:
     return seg_diff + page_diff
 
 
-def show_record(retriever, url_substring: str, limit: int = 5) -> None:
-    """Print one record's stored metadata beside a live re-classification."""
-    from .intent import classify_page, classify_segment
-    found = [r for r in retriever.records
-             if url_substring.lower() in (r.get("source_url", "") or "").lower()]
+def show_record(retriever, needle: str, limit: int = 5) -> None:
+    """Print a record's stored metadata beside a live re-classification.
+
+    Matches on URL, title, section heading or chunk_id, case- and
+    separator-insensitively, because the caller rarely knows the exact Sitecore
+    slug. On a miss it suggests near matches rather than just failing.
+    """
+    from .intent import derive_page_type, derive_segment
+
+    def norm(text: str) -> str:
+        return re.sub(r"[^a-z0-9\u0600-\u06ff]+", " ",
+                      unquote_plus(text or "").lower()).strip()
+
+    target = norm(needle)
+    words = [w for w in target.split() if w]
+
+    def haystack(rec):
+        return norm(" ".join((rec.get("source_url", ""), rec.get("title", ""),
+                              rec.get("section_heading", ""),
+                              rec.get("chunk_id", ""))))
+
+    found = [r for r in retriever.records if target and target in haystack(r)]
+    if not found and words:
+        # Fall back to all-words-present, then any-word, so a partly-remembered
+        # name still lands somewhere useful.
+        found = [r for r in retriever.records
+                 if all(w in haystack(r) for w in words)]
     if not found:
-        print(f"no record whose URL contains {url_substring!r}")
+        print(f"no record matching {needle!r}")
+        scored = []
+        for rec in retriever.records:
+            hay = haystack(rec)
+            hits = sum(1 for w in words if w in hay)
+            if hits:
+                scored.append((hits, rec))
+        scored.sort(key=lambda kv: -kv[0])
+        if scored:
+            print("\n  did you mean one of these?")
+            seen = set()
+            for _, rec in scored[:12]:
+                url = rec.get("source_url", "")
+                if url in seen:
+                    continue
+                seen.add(url)
+                print(f"    {(rec.get('title') or '')[:44]:<44} {url[:80]}")
+        else:
+            print("\n  no partial matches either. List what is indexed with:")
+            print("    python diagnose_retrieval.py --overview")
         return
+
     for rec in found[:limit]:
         url, title = rec.get("source_url", ""), rec.get("title", "")
+        doc_type = rec.get("document_type", "html")
         print("=" * 100)
         print(f"  url      {url}")
         print(f"  title    {title}")
         print(f"  heading  {rec.get('section_heading')}")
+        print(f"  type     {doc_type}   chunk_id={rec.get('chunk_id')}")
         print(f"  {'field':<12} {'STORED IN INDEX':<20} {'LIVE (current code)':<20}")
-        print(f"  {'-'*12} {'-'*20} {'-'*20}")
-        for field, live in (("segment", classify_segment(url, title)),
-                            ("page_type", classify_page(url, title))):
+        print(f"  {'-' * 12} {'-' * 20} {'-' * 20}")
+        for field, live in (("segment", derive_segment(url, title, doc_type)),
+                            ("page_type", derive_page_type(url, title, doc_type))):
             stored = rec.get(field)
             flag = "" if stored == live else "   <-- DIFFERS (index is stale)"
             print(f"  {field:<12} {str(stored):<20} {str(live):<20}{flag}")
         print(f"  {'language':<12} {str(rec.get('language')):<20}")
+        print(f"  {'has_table':<12} {str(rec.get('has_table')):<20}")
+    if len(found) > limit:
+        print(f"\n  ({len(found) - limit} more matches not shown)")

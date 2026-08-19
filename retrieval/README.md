@@ -144,6 +144,27 @@ the 256 PDF units: `pdf_documents.jsonl` predates the language fix and was never
 regenerated. Language is now derived from the chunk text at index time, so the
 frozen corpus does not need re-ingesting.
 
+## One derivation, called from everywhere
+
+Three bugs here came from the same pattern: a field computed one way at build
+time and another way when checked or used — first `language`, then `segment`,
+then `page_type`. The cure is not a better checker but a single derivation:
+
+```python
+from retrieval.intent import derive_page_type, derive_segment
+```
+
+Both take **only fields stored on the record** (`url`, `title`,
+`document_type`), so the value is reproducible from the record alone.
+Breadcrumbs were dropped from `page_type` for exactly this reason — they are
+not stored, so using them made the result unverifiable.
+
+Attachments (`document_type == "pdf"`) are **product data by definition**:
+tariff, rate and terms documents. Their URLs carry no section hints, and
+`/-/media/…` actually matches the *news* pattern (it contains "media"), so
+classifying them by URL would tag every tariff PDF as news — and hand it the
+news ranking penalty. That override is load-bearing, not cosmetic.
+
 ## Is my index stale?
 
 Metadata (`page_type`, `segment`, `language`) is regenerated on **every**

@@ -212,6 +212,37 @@ def heading_matches_intent(heading: str, intents: list[str]) -> bool:
     return False
 
 
+# --- single source of truth for record metadata -----------------------------
+# Three separate bugs in this project came from the same pattern: a field
+# computed one way when the index is built and another way when it is checked
+# or used. Language, then segment, then page_type. The cure is not a better
+# checker - it is that there must be exactly ONE derivation, called from both
+# places, taking only inputs that are stored on the record so the result is
+# reproducible from the record alone.
+
+def derive_page_type(url: str, title: str = "",
+                     document_type: str = "html") -> str:
+    """The one definition of a record's page_type.
+
+    PDFs and other attachments are tariff, rate and terms documents - product
+    data by definition - and their URLs (/-/media/x.ashx) carry no section
+    hints, so classifying them by URL pattern is meaningless.
+
+    Deliberately does NOT use breadcrumbs: they are not stored on the record,
+    so including them would make this irreproducible at query time - exactly
+    the divergence this function exists to prevent.
+    """
+    if document_type == "pdf":
+        return "product"
+    return classify_page(url, title)
+
+
+def derive_segment(url: str, title: str = "",
+                   document_type: str = "html") -> str:
+    """The one definition of a record's segment."""
+    return classify_segment(url, title)
+
+
 def looks_like_product_page(url: str, title: str) -> bool:
     return classify_page(url, title) == "product"
 

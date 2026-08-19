@@ -652,9 +652,9 @@ class TestIndexStalenessDetection(unittest.TestCase):
             first = Retriever(index_dir).records[0]["segment"]
             self.assertEqual(first, "consumer")
 
-            original = R.classify_segment
+            original = R.derive_segment
             try:
-                R.classify_segment = lambda url, title="", text="": "corporate"
+                R.derive_segment = lambda url, title="", document_type="html": "corporate"
                 idx = VectorIndex(index_dir)
                 stats = idx.build(load_all(corpus), build_embedder("hashing"),
                                   cache_dir=Path(tmp) / "cache")
@@ -665,7 +665,7 @@ class TestIndexStalenessDetection(unittest.TestCase):
                 self.assertEqual(Retriever(index_dir).records[0]["segment"],
                                  "corporate")
             finally:
-                R.classify_segment = original
+                R.derive_segment = original
 
     def test_manifest_records_the_classifier_fingerprint(self):
         from retrieval.intent import classifier_fingerprint
@@ -693,3 +693,133 @@ class TestIndexStalenessDetection(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _, index_dir = self._build(Path(tmp))
             self.assertEqual(check_staleness(Retriever(index_dir)), 0)
+
+
+class TestMetadataDerivationIsSingleSourced(unittest.TestCase):
+    """Three bugs in this project came from one pattern: a field computed one
+    way at build time and another way when checked or used (language, then
+    segment, then page_type). There must be exactly one derivation, callable
+    from both places, using only inputs stored on the record."""
+
+    MEDIA_URLS = [
+        ("https://www.banquemisr.com/-/media/BM-Online-Business/"
+         "Domestic-Transfer-EN.ashx", "Domestic-Transfer-EN.ashx"),
+        ("https://www.banquemisr.com/-/media/BM/Exchange-rate-EN.ashx",
+         "Exchange-rate-EN.ashx"),
+        ("https://www.banquemisr.com/docs/card-tariff.pdf", "card-tariff.pdf"),
+    ]
+
+    def test_attachments_are_product_data_whatever_their_url(self):
+        from retrieval.intent import derive_page_type
+        for url, title in self.MEDIA_URLS:
+            self.assertEqual(derive_page_type(url, title, "pdf"), "product", url)
+
+    def test_sitecore_media_paths_would_otherwise_classify_as_news(self):
+        # The trap that produced 256 false "stale" reports: /-/media/ contains
+        # "media", which the news pattern matches. Left uncorrected it would
+        # also hit every tariff PDF with the news ranking penalty.
+        from retrieval.intent import classify_page
+        url, title = self.MEDIA_URLS[0]
+        self.assertEqual(classify_page(url, title), "news")
+
+    def test_html_page_type_is_unaffected(self):
+        from retrieval.intent import classify_page, derive_page_type
+        url = ("https://www.banquemisr.com/home/smes/retail%20banking/pages/"
+               "cards/gold")
+        self.assertEqual(derive_page_type(url, "Gold Card", "html"),
+                         classify_page(url, "Gold Card"))
+
+    def test_derivation_needs_only_fields_stored_on_the_record(self):
+        # Breadcrumbs are deliberately excluded: they are not stored on the
+        # record, so using them would make the value irreproducible at query
+        # time - precisely the divergence this function prevents.
+        import inspect
+        from retrieval.intent import derive_page_type
+        params = set(inspect.signature(derive_page_type).parameters)
+        self.assertEqual(params, {"url", "title", "document_type"})
+
+
+class TestStalenessWithPdfRecords(unittest.TestCase):
+    """A freshly built index containing PDFs must report zero differences."""
+
+    def _corpus(self, dirpath: Path) -> None:
+        dirpath.mkdir(parents=True, exist_ok=True)
+        url = ("https://www.banquemisr.com/home/smes/retail%20banking/pages/"
+               "cards/gold")
+        (dirpath / "documents.jsonl").write_text(json.dumps({
+            "url": url, "source_url": url, "final_url": url,
+            "title": "Gold Card", "language": "en", "content_hash": "h",
+            "fetched_at": "2026-08-18T00:00:00Z", "breadcrumbs": ["Home", "Cards"],
+            "section_path": [], "text": "gold card",
+            "sections": [{"heading": "Fees", "level": 2, "anchor": "fees",
+                          "text": "The annual fee for the Gold card is EGP 350 "
+                                  "and eligibility requires proof of income."}],
+            "tables": [], "links": [], "pdf_links": [], "doc_type": "page",
+            "word_count": 20}, ensure_ascii=False) + "\n", encoding="utf-8")
+
+        pdf_text = ("Tariff of fees and commissions for payment cards. "
+                    "Annual fee Classic EGP 150 Gold EGP 350 Platinum EGP 800.")
+        rows = []
+        for name in ("Domestic-Transfer-EN", "Exchange-rate-EN", "Card-Tariff-EN"):
+            purl = f"https://www.banquemisr.com/-/media/BM/{name}.ashx"
+            rows.append(json.dumps({
+                "url": purl, "source_url": purl, "title": f"{name}.ashx",
+                "language": "en", "text": pdf_text, "pdf_pages": 2,
+                "doc_type": "pdf", "needs_ocr": False, "attachment_kind": "pdf",
+                "fetched_at": "2026-08-18T00:00:00Z"}, ensure_ascii=False))
+        (dirpath / "pdf_documents.jsonl").write_text("\n".join(rows) + "\n",
+                                                     encoding="utf-8")
+
+    def test_fresh_index_with_pdfs_is_not_stale(self):
+        from retrieval.diagnostics import check_staleness
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            corpus = tmp / "corpus"
+            self._corpus(corpus)
+            records = load_all(corpus)
+            self.assertTrue([r for r in records if r.document_type == "pdf"])
+            idx = VectorIndex(tmp / "index")
+            idx.build(records, build_embedder("hashing"), cache_dir=tmp / "cache")
+            idx.save()
+            self.assertEqual(check_staleness(Retriever(tmp / "index")), 0)
+
+    def test_pdf_records_are_stored_as_product(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = Path(tmp) / "corpus"
+            self._corpus(corpus)
+            pdfs = [r for r in load_all(corpus) if r.document_type == "pdf"]
+            self.assertTrue(pdfs)
+            self.assertTrue(all(r.page_type == "product" for r in pdfs))
+
+
+class TestRecordLookupIsForgiving(RetrievalEvalFixture):
+    """The caller rarely knows the exact Sitecore slug."""
+
+    def _capture(self, needle):
+        import io
+        from contextlib import redirect_stdout
+        from retrieval.diagnostics import show_record
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            show_record(self.r, needle)
+        return buf.getvalue()
+
+    def test_matches_on_title_not_just_url(self):
+        out = self._capture("Gold Credit Card")
+        self.assertIn("STORED IN INDEX", out)
+
+    def test_matches_case_and_separator_insensitively(self):
+        self.assertIn("STORED IN INDEX", self._capture("gold-credit-card"))
+        self.assertIn("STORED IN INDEX", self._capture("GOLD CREDIT CARD"))
+
+    def test_partial_words_still_find_the_record(self):
+        self.assertIn("STORED IN INDEX", self._capture("platinum"))
+
+    def test_a_miss_suggests_near_matches_instead_of_just_failing(self):
+        out = self._capture("bm-youth-card")
+        self.assertIn("no record matching", out)
+        self.assertIn("did you mean", out.lower())
+
+    def test_total_miss_points_at_the_overview_command(self):
+        out = self._capture("zzzzz-nonexistent-qqqq")
+        self.assertIn("no record matching", out)

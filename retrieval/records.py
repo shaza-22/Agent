@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
-from .intent import classify_page, classify_segment
+from .intent import derive_page_type, derive_segment
 
 try:      # config lives in the Phase 1 package; retrieval must not hard-depend on it
     import sys as _sys
@@ -111,7 +111,6 @@ def load_html_records(path: Path, min_words: int = 8) -> list[RetrievalRecord]:
             # is unmatchable without "Gold Card" attached to it.
             embed_text = f"{title} - {heading}\n{text}" if heading else f"{title}\n{text}"
             anchor = sec.get("anchor")
-            crumbs = " ".join(doc.get("breadcrumbs") or [])
             out.append(RetrievalRecord(
                 chunk_id=_chunk_id(url, "html", i, text),
                 source_url=url,
@@ -126,8 +125,8 @@ def load_html_records(path: Path, min_words: int = 8) -> list[RetrievalRecord]:
                 chunk_index=i,
                 section_level=int(sec.get("level") or 0),
                 word_count=len(text.split()),
-                page_type=classify_page(url, title, crumbs),
-                segment=classify_segment(url, title, doc.get("text", "")),
+                page_type=derive_page_type(url, title, "html"),
+                segment=derive_segment(url, title, "html"),
                 has_table=bool(table_md) and i == 0,
             ))
     return out
@@ -232,8 +231,8 @@ def load_pdf_records(path: Path, min_words: int = 8,
                 pdf_page=page,
                 chunk_index=i,
                 word_count=len(chunk.split()),
-                page_type="product",   # tariff/rate attachments are product data
-                segment=classify_segment(url, title, chunk),
+                page_type=derive_page_type(url, title, "pdf"),
+                segment=derive_segment(url, title, "pdf"),
                 has_table=bool(re.search(r"\|.*\|", chunk)),
                 extra={"page_is_estimated": bool(page),
                        "attachment_kind": doc.get("attachment_kind")},
