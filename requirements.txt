@@ -16,3 +16,7 @@ faiss-cpu>=1.8
 # The embedding model. Weights download from huggingface.co on first use.
 # Retrieval degrades to BM25-only (still useful) if this is unavailable.
 sentence-transformers>=3.0
+
+# Optional: the Phase 2 demo UI only (streamlit_demo.py). Not needed to build
+# or query the index.
+# streamlit>=1.28

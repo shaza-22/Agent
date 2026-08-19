@@ -255,6 +255,32 @@ python refetch.py --match '(?i)(fee|tariff|rate|charge)' --discover-links
 stays frozen at its crawl-time value and `audit.py` reports the same count
 forever, however many times you render.
 
+## Demo UI (Phase 2)
+
+A minimal Streamlit page for showing retrieval working, rather than reading
+terminal output.
+
+```bash
+pip install streamlit
+streamlit run streamlit_demo.py          # opens http://localhost:8501
+```
+
+Requires a built index (`python -m retrieval.build`). Point the sidebar at a
+different directory if yours is not at `data/retrieval`.
+
+It offers a question box (English or Arabic), a language filter
+(**Auto** — which leaves retrieval behaviour unchanged — English, Arabic), the
+five test queries as one-click buttons, and result cards showing rank,
+confidence as a percentage with a bar, title, section heading, snippet,
+language badge and a clickable source link. Arabic snippets render
+right-to-left. Raw scores are tucked into an expander rather than shown as the
+headline number.
+
+**It is a read-only wrapper.** It imports `retrieval.Retriever` and calls it —
+no ranking, scoring, chunking or embedding logic is duplicated in the UI, and
+it never rebuilds or writes the index. Showing results is not evidence that
+they are correct.
+
 ## Crawling policy
 
 Public marketing pages only. `robots.txt` is obeyed, requests are serialised
